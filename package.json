@@ -8,10 +8,12 @@
     "rank:dev": "node scripts/rank-local.mjs",
     "build": "vite build",
     "preview": "vite preview",
+    "deploy": "npm run build && wrangler deploy",
     "enrich": "node scripts/enrich-artwork.mjs",
     "roster": "node scripts/build-roster.mjs && node scripts/rebuild-from-cache.mjs"
   },
   "devDependencies": {
-    "vite": "^6.3.5"
+    "vite": "^6.3.5",
+    "wrangler": "^4.114.0"
   }
 }

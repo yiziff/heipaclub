@@ -1,0 +1,13 @@
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "heipaclub",
+  "compatibility_date": "2026-07-27",
+  "observability": {
+    "enabled": true
+  },
+  // Vite 先 build 出 dist，再由 Worker 静态资源托管（SPA）
+  "assets": {
+    "directory": "./dist",
+    "not_found_handling": "single-page-application"
+  }
+}

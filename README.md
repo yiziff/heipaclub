@@ -38,9 +38,24 @@ npm run dev
 
 ## 上线（Cloudflare）
 
-1. 前端：`npm run build` → Cloudflare Pages  
-2. 排行榜：见 [`worker/`](./worker/)（Worker + D1）  
-3. 音乐：自建小服务器跑 api-enhanced，由 Pages/Worker 反代 `/api/netease`
+### 前端（Workers + 静态资源）
+
+仓库根目录已有 `wrangler.jsonc`（托管 `dist`，SPA 回退）。
+
+Cloudflare 控制台建议：
+
+| 项 | 值 |
+|----|----|
+| Build command | `npm run build` |
+| Deploy command | `npx wrangler deploy` |
+| Output directory | `dist` |
+
+或本地：`npm run deploy`。
+
+### 其余
+
+1. 排行榜：见 [`worker/`](./worker/)（Worker + D1，与前端 Worker 分开）  
+2. 音乐：自建小服务器跑 api-enhanced，反代 `/api/netease`
 
 本地 `data/rank-store.json` 仅开发用；生产用 D1。
 
