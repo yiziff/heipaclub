@@ -10,4 +10,5 @@ dist/
 .env
 .env.*
 data/rank-store.json
+.wrangler/
 worker/.wrangler/
