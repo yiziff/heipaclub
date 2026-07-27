@@ -46,11 +46,11 @@ Cloudflare 控制台建议：
 
 | 项 | 值 |
 |----|----|
-| Build command | `npm run build` |
-| Deploy command | `npx wrangler deploy` |
+| Build command | `npm run build`（可留空，若 Deploy 已含 build） |
+| Deploy command | `npm run deploy` |
 | Output directory | `dist` |
 
-或本地：`npm run deploy`。
+**注意：** Deploy 必须写成 `npm run deploy`（内部是 `build && wrangler deploy`）。只写 `npx wrangler deploy` 时，Cloudflare 可能不先 build，还会误进 Vite 自动 setup。
 
 ### 其余
 
