@@ -1,0 +1,36 @@
+{
+  "avatar:gai": {
+    "avatar": "https://is1-ssl.mzstatic.com/image/thumb/Music211/v4/6b/a2/21/6ba2216f-c633-74c5-3bcf-214713e86946/cover.jpg/600x600bb.jpg"
+  },
+  "song:gai:火锅底料": {
+    "ok": true,
+    "cover": "https://is1-ssl.mzstatic.com/image/thumb/Music211/v4/3e/81/1e/3e811ef3-d7f7-e669-c916-478167eafd3c/cover.jpg/600x600bb.jpg",
+    "coverSm": "https://is1-ssl.mzstatic.com/image/thumb/Music211/v4/3e/81/1e/3e811ef3-d7f7-e669-c916-478167eafd3c/cover.jpg/200x200bb.jpg",
+    "itunesTrack": "火锅底料",
+    "itunesArtist": "GAI",
+    "previewUrl": "https://audio-ssl.itunes.apple.com/itunes-assets/AudioPreview221/v4/4d/59/67/4d596733-2e61-a9de-38f4-1a900ac7bb58/mzaf_16292632351905147721.plus.aac.p.m4a",
+    "collection": "火锅底料 - Single",
+    "score": 95
+  },
+  "avatar:pharaoh": {
+    "avatar": ""
+  },
+  "avatar:masiwei": {
+    "avatar": ""
+  },
+  "avatar:keyl": {
+    "avatar": ""
+  },
+  "avatar:vava": {
+    "avatar": ""
+  },
+  "avatar:air": {
+    "avatar": ""
+  },
+  "avatar:kungfupen": {
+    "avatar": ""
+  },
+  "avatar:tizzy": {
+    "avatar": ""
+  }
+}

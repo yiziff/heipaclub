@@ -1,0 +1,1790 @@
+import "./style.css";
+import {
+  ARTISTS,
+  getArtist,
+} from "./data/artists.js";
+import { coverUrl, imgTag } from "./artwork.js";
+import {
+  drawHangLaField,
+  emptyHangLaState,
+  fanFilterMeta,
+  filterArtistsByMinFans,
+  findArtist,
+  hangLaProgress,
+  hangLaSummaryLines,
+  HANG_LA_COUNT,
+  HANG_LA_FAN_FILTERS,
+  HANG_LA_TIERS,
+  placeArtist,
+} from "./hangla.js";
+import { loadArtistCup, pingApi, searchArtist } from "./netease.js";
+import { createPlayer } from "./player.js";
+import {
+  fetchArtistRank,
+  fetchSongRank,
+  reportChampionWin,
+} from "./rank-api.js";
+import {
+  buildBracket,
+  buildField,
+  chooseWinner,
+  currentMatch,
+  findRoundIndex,
+  isRoundComplete,
+  nearestFieldSize,
+  podiumFromBracket,
+  progressText,
+  roundLabel,
+  splashForBracket,
+} from "./tournament.js";
+
+const STORAGE_KEY = "cn-rap-cup:v5";
+const TOP_N = 50;
+const FIELD_MAX = 32;
+const app = document.getElementById("app");
+const artistCache = new Map();
+
+function loadState() {
+  try {
+    return JSON.parse(localStorage.getItem(STORAGE_KEY) || "null");
+  } catch {
+    return null;
+  }
+}
+
+function saveState(state) {
+  localStorage.setItem(STORAGE_KEY, JSON.stringify(state));
+}
+
+function clearState() {
+  localStorage.removeItem(STORAGE_KEY);
+}
+
+function route() {
+  const hash = location.hash.replace(/^#/, "") || "/";
+  const parts = hash.split("/").filter(Boolean).map((p) => {
+    try {
+      return decodeURIComponent(p);
+    } catch {
+      return p;
+    }
+  });
+  return { parts, hash };
+}
+
+function navigate(path) {
+  location.hash = path;
+}
+
+window.addEventListener("hashchange", render);
+bootstrap();
+
+async function bootstrap() {
+  // Soft-fill home avatars in background after first paint
+  render();
+  softFillAvatars();
+}
+
+function render() {
+  const { parts } = route();
+  const saved = loadState();
+
+  if (parts[0] === "rank") {
+    renderRank(parts[1] === "artists" ? "artists" : "songs");
+    return;
+  }
+  if (parts[0] === "bracket" && saved?.bracket && !saved.bracket.champion) {
+    renderBracketPreview(saved);
+    return;
+  }
+  if (parts[0] === "play" && saved?.bracket && !saved.bracket.champion) {
+    renderMatch(saved);
+    return;
+  }
+  if (parts[0] === "champ" && saved?.bracket?.champion) {
+    renderChamp(saved);
+    return;
+  }
+  if (parts[0] === "artist" && parts[1]) {
+    renderSetup(parts[1]);
+    return;
+  }
+  if (parts[0] === "hangla") {
+    renderHangLa();
+    return;
+  }
+  renderHome();
+}
+
+function shell(inner, { back, actions = "", wide = false, underBrand = "" } = {}) {
+  return `
+    <div class="shell ${wide ? "shell-wide" : ""}">
+      <header class="topbar">
+        <div class="topbar-brand-col">
+          <a class="brand" href="#/" aria-label="真黑怕巅峰对决首页">
+            <div class="brand-mark">真黑怕<span>巅峰对决</span></div>
+          </a>
+          ${underBrand}
+        </div>
+        <div class="topbar-actions">
+          ${actions}
+          ${
+            back
+              ? `<button type="button" class="ghost-btn" data-back="${back}">${back === "/" ? "回首页" : "返回"}</button>`
+              : `<a class="ghost-btn" href="#/rank">排行榜</a>`
+          }
+        </div>
+      </header>
+      ${inner}
+    </div>
+  `;
+}
+
+function bindBack() {
+  app.querySelectorAll("[data-back]").forEach((btn) => {
+    btn.addEventListener("click", () => navigate(btn.dataset.back));
+  });
+}
+
+async function softFillAvatars() {
+  for (const a of ARTISTS) {
+    if (a.avatar) continue;
+    try {
+      const hits = await searchArtist(a.search || a.name);
+      if (hits[0]?.avatar) {
+        a.avatar = hits[0].avatar;
+        const node = app.querySelector(`[data-artist="${a.id}"] .artist-avatar, [data-artist="${a.id}"] .img-fallback`);
+        if (node && location.hash.replace(/^#/, "") === "/") {
+          const img = document.createElement("img");
+          img.className = "artist-avatar";
+          img.src = a.avatar;
+          img.alt = a.name;
+          img.loading = "lazy";
+          img.referrerPolicy = "no-referrer";
+          node.replaceWith(img);
+        }
+      }
+    } catch (_) {}
+  }
+}
+
+async function hydrateArtist(id) {
+  if (artistCache.has(id)) return artistCache.get(id);
+  const base = getArtist(id);
+  if (!base) return null;
+  const live = await loadArtistCup(base, { limit: TOP_N });
+  artistCache.set(id, live);
+  // also stash avatar on catalog for home
+  base.avatar = live.avatar;
+  return live;
+}
+
+function renderHome() {
+  /** @type {"fans" | "alpha" | "rank"} */
+  let sortMode = "fans";
+  /** neteaseArtistId or name → wins */
+  const rankWins = new Map();
+
+  const filteredList = (q = "") => {
+    const query = q.trim().toLowerCase();
+    if (!query) return [...ARTISTS];
+    return ARTISTS.filter((a) =>
+      [a.name, a.search, a.city, a.tag, a.blurb]
+        .join(" ")
+        .toLowerCase()
+        .includes(query)
+    );
+  };
+
+  const artistRankKey = (a) => String(a.neteaseArtistId || a.id || a.name || "");
+
+  const sortList = (list) => {
+    const arr = [...list];
+    if (sortMode === "alpha") {
+      arr.sort((a, b) =>
+        String(a.name || "").localeCompare(String(b.name || ""), "zh-CN", {
+          sensitivity: "base",
+          numeric: true,
+        })
+      );
+      return arr;
+    }
+    if (sortMode === "rank") {
+      arr.sort((a, b) => {
+        const wa = rankWins.get(artistRankKey(a)) || rankWins.get(a.name) || 0;
+        const wb = rankWins.get(artistRankKey(b)) || rankWins.get(b.name) || 0;
+        if (wb !== wa) return wb - wa;
+        return Number(b.fans || 0) - Number(a.fans || 0);
+      });
+      return arr;
+    }
+    // default: fans desc
+    arr.sort((a, b) => Number(b.fans || 0) - Number(a.fans || 0));
+    return arr;
+  };
+
+  const paintGrid = (q = "") => {
+    const list = sortList(filteredList(q));
+    const grid = document.getElementById("artist-grid");
+    const count = document.getElementById("artist-count");
+    if (!grid) return;
+    if (count) count.textContent = `${list.length} / ${ARTISTS.length} 位 Rapper`;
+    grid.innerHTML = list.length
+      ? list
+          .map((a) => {
+            const wins = rankWins.get(artistRankKey(a)) || rankWins.get(a.name) || 0;
+            const winMeta =
+              sortMode === "rank" && wins
+                ? ` · 单曲夺冠 ${Number(wins).toLocaleString("zh-CN")} 次`
+                : "";
+            return `
+        <button type="button" class="artist-card" data-artist="${a.id}">
+          ${imgTag(a.avatar, { alt: a.name, className: "artist-avatar" })}
+          <div class="artist-card-body">
+            <div class="name">${esc(a.name)}</div>
+            <p class="meta">${esc(a.city)} · ${esc(a.tag)}${
+              a.fans ? ` · ${Number(a.fans).toLocaleString("zh-CN")} 粉` : ` · 热门 ${TOP_N}`
+            }${winMeta}</p>
+          </div>
+        </button>`;
+          })
+          .join("")
+      : `<p class="loading-line">没有匹配的 Rapper，换个关键词试试。</p>`;
+
+    grid.querySelectorAll("[data-artist]").forEach((btn) => {
+      btn.addEventListener("click", () => navigate(`/artist/${btn.dataset.artist}`));
+    });
+  };
+
+  app.innerHTML = shell(`
+    <section class="hero">
+      <h1>真黑怕<br /><em>巅峰对决</em></h1>
+    </section>
+    <div class="section-title">选择歌手 <span id="artist-count">${ARTISTS.length} / ${ARTISTS.length} 位 Rapper</span></div>
+    <div class="search-row search-row-with-hangla">
+      <input id="artist-search" type="search" placeholder="搜：扬布拉德 / Digi / 新说唱 / 成都…" autocomplete="off" />
+      <button type="button" class="hangla-inline-btn" id="hangla-entry">从夯到拉 · 抽 15 排</button>
+    </div>
+    <div class="filter-row sort-row" id="sort-row" role="group" aria-label="排序方式">
+      <span class="sort-label">排序</span>
+      <button type="button" class="mode-chip active" data-sort="fans">粉丝量</button>
+      <button type="button" class="mode-chip" data-sort="alpha">首字母</button>
+      <button type="button" class="mode-chip" data-sort="rank">本站夺冠次数</button>
+    </div>
+    <div class="artist-grid" id="artist-grid"></div>
+  `);
+
+  paintGrid("");
+
+  document.getElementById("hangla-entry")?.addEventListener("click", () => navigate("/hangla"));
+
+  const input = document.getElementById("artist-search");
+  const apply = () => paintGrid(input?.value || "");
+  input?.addEventListener("input", apply);
+
+  document.querySelectorAll("#sort-row [data-sort]").forEach((chip) => {
+    chip.addEventListener("click", () => {
+      sortMode = chip.dataset.sort || "fans";
+      document
+        .querySelectorAll("#sort-row .mode-chip")
+        .forEach((c) => c.classList.toggle("active", c === chip));
+      apply();
+    });
+  });
+
+  // load site artist wins for rank sort (best-effort)
+  fetchArtistRank({ limit: 200 })
+    .then((data) => {
+      for (const item of data.items || []) {
+        const wins = Number(item.wins || 0) || 0;
+        if (item.artistId) rankWins.set(String(item.artistId), wins);
+        if (item.name) rankWins.set(String(item.name), wins);
+      }
+      if (sortMode === "rank") apply();
+    })
+    .catch(() => {});
+
+  const saved = loadState();
+  if (saved?.bracket && !saved.bracket.champion) {
+    const resume = document.createElement("p");
+    resume.style.marginTop = "1.5rem";
+    resume.innerHTML = `<button type="button" class="primary-btn" id="resume-btn">继续未完赛的 ${esc(saved.artistName)}</button>`;
+    app.querySelector(".shell").appendChild(resume);
+    document.getElementById("resume-btn").addEventListener("click", () => navigate("/play"));
+  }
+}
+
+function hangLaChip(artist, { selected = false, inTier = false } = {}) {
+  if (!artist) return "";
+  return `
+    <button
+      type="button"
+      class="hangla-chip${selected ? " is-selected" : ""}${inTier ? " in-tier" : ""}"
+      data-hangla-id="${esc(artist.id)}"
+    >
+      ${imgTag(artist.avatar, { alt: artist.name, className: "hangla-chip-avatar" })}
+      <span class="hangla-chip-name">${esc(artist.name)}</span>
+    </button>
+  `;
+}
+
+function hangLaBlindCard(artist) {
+  if (!artist) return `<p class="hangla-empty">全部排完了</p>`;
+  return `
+    <div class="hangla-blind-card" data-hangla-id="${esc(artist.id)}">
+      ${imgTag(artist.avatar, { alt: artist.name, className: "hangla-blind-avatar" })}
+      <div class="hangla-blind-meta">
+        <strong>${esc(artist.name)}</strong>
+        <span>${esc(artist.city || artist.tag || "Rapper")}${artist.fans ? ` · ${Number(artist.fans).toLocaleString("zh-CN")} 粉` : ""}</span>
+      </div>
+    </div>
+  `;
+}
+
+function renderHangLa() {
+  let fanFilterId = "any";
+  let playMode = "open"; // open | blind
+  let state = null;
+  let selectedId = null;
+  let toastTimer = null;
+
+  const minFansOf = () => fanFilterMeta(fanFilterId).minFans;
+  const eligibleCount = () => filterArtistsByMinFans(ARTISTS, minFansOf()).length;
+  const modeLabel = () => (playMode === "blind" || state?.mode === "blind" ? "盲排" : "明牌");
+
+  const showToast = (msg) => {
+    const el = document.getElementById("hangla-toast");
+    if (!el) return;
+    el.hidden = false;
+    el.textContent = msg;
+    el.classList.add("is-on");
+    if (toastTimer) clearTimeout(toastTimer);
+    toastTimer = setTimeout(() => el.classList.remove("is-on"), 1800);
+  };
+
+  const startRound = () => {
+    const field = drawHangLaField(ARTISTS, HANG_LA_COUNT, { minFans: minFansOf() });
+    if (field.length < 3) {
+      showToast("符合条件的 Rapper 太少，请降低粉丝门槛");
+      return false;
+    }
+    state = emptyHangLaState(field, { mode: playMode });
+    selectedId = state.mode === "blind" ? state.current : null;
+    return true;
+  };
+
+  const fanLabel = () => fanFilterMeta(fanFilterId).label;
+
+  const paint = (mode = "setup") => {
+    if (mode === "setup") {
+      const count = eligibleCount();
+      app.innerHTML = shell(
+        `
+        <section class="hangla-screen">
+          <header class="hangla-head">
+            <h1>从夯到拉</h1>
+            <p>随机抽 ${HANG_LA_COUNT} 位 · 「夯」最多 2 人 · 选模式与粉丝门槛再开抽</p>
+          </header>
+
+          <div class="hangla-setup">
+            <div class="hangla-section-label">玩法模式</div>
+            <div class="filter-row sort-row" id="hangla-mode-row" role="group" aria-label="玩法模式">
+              <button type="button" class="mode-chip${playMode === "open" ? " active" : ""}" data-play-mode="open">明牌</button>
+              <button type="button" class="mode-chip${playMode === "blind" ? " active" : ""}" data-play-mode="blind">盲排</button>
+            </div>
+            <p class="hangla-setup-hint">${
+              playMode === "blind"
+                ? "盲排：不会一次性亮出 15 人，排完一位再翻下一位。"
+                : "明牌：先看到全部 15 人，再自由分档。"
+            }</p>
+
+            <div class="hangla-section-label">网易云粉丝最低要求</div>
+            <div class="filter-row sort-row" id="hangla-fan-row" role="group" aria-label="粉丝门槛">
+              ${HANG_LA_FAN_FILTERS.map(
+                (f) => `
+                <button type="button" class="mode-chip${f.id === fanFilterId ? " active" : ""}" data-fan-filter="${f.id}">
+                  ${esc(f.label)}
+                </button>`
+              ).join("")}
+            </div>
+            <p class="hangla-setup-meta">当前池子约 <strong>${count}</strong> 位 · 将随机抽取 ${Math.min(
+              HANG_LA_COUNT,
+              count
+            )} 人</p>
+            <div class="hangla-actions">
+              <button type="button" class="primary-btn" id="hangla-start" ${count < 3 ? "disabled" : ""}>开始抽签</button>
+            </div>
+          </div>
+          <p class="hangla-toast" id="hangla-toast" role="status"></p>
+        </section>
+      `,
+        { back: "/" }
+      );
+      bindBack();
+
+      document.querySelectorAll("#hangla-mode-row [data-play-mode]").forEach((chip) => {
+        chip.addEventListener("click", () => {
+          playMode = chip.dataset.playMode === "blind" ? "blind" : "open";
+          paint("setup");
+        });
+      });
+      document.querySelectorAll("#hangla-fan-row [data-fan-filter]").forEach((chip) => {
+        chip.addEventListener("click", () => {
+          fanFilterId = chip.dataset.fanFilter || "any";
+          paint("setup");
+        });
+      });
+      document.getElementById("hangla-start")?.addEventListener("click", () => {
+        if (!startRound()) {
+          paint("setup");
+          showToast("符合条件的 Rapper 太少，请降低粉丝门槛");
+          return;
+        }
+        paint("play");
+      });
+      return;
+    }
+
+    if (!state) {
+      paint("setup");
+      return;
+    }
+
+    const progress = hangLaProgress(state);
+    const blind = state.mode === "blind";
+
+    if (mode === "done") {
+      const lines = hangLaSummaryLines(state);
+      app.innerHTML = shell(
+        `
+        <section class="hangla-screen">
+          <header class="hangla-head">
+            <h1>从夯到拉 · 结果</h1>
+            <p>${esc(modeLabel())} · 粉丝门槛 ${esc(fanLabel())} · 随机 ${state.field.length} 位 · 夯最多 2 人</p>
+          </header>
+          <div class="hangla-result">
+            ${HANG_LA_TIERS.map((t) => {
+              const ids = state.tiers[t.id] || [];
+              return `
+                <div class="hangla-result-row tier-${t.id}">
+                  <div class="hangla-tier-label">${esc(t.label)}</div>
+                  <div class="hangla-result-names">
+                    ${
+                      ids.length
+                        ? ids
+                            .map((id) => {
+                              const a = findArtist(state.field, id);
+                              return `<span class="hangla-result-pill">${imgTag(a?.avatar, {
+                                alt: a?.name || "",
+                                className: "hangla-chip-avatar",
+                              })}${esc(a?.name || id)}</span>`;
+                            })
+                            .join("")
+                        : `<span class="hangla-empty">（空）</span>`
+                    }
+                  </div>
+                </div>`;
+            }).join("")}
+          </div>
+          <div class="hangla-actions">
+            <button type="button" class="primary-btn" id="hangla-copy">复制结果</button>
+            <button type="button" class="ghost-btn" id="hangla-again">同一设置再抽</button>
+            <button type="button" class="ghost-btn" id="hangla-reset">改设置</button>
+          </div>
+          <p class="hangla-toast" id="hangla-toast" role="status"></p>
+        </section>
+      `,
+        { back: "/" }
+      );
+      bindBack();
+      document.getElementById("hangla-copy")?.addEventListener("click", async () => {
+        const text = [`真黑怕 · 从夯到拉 · ${modeLabel()}（${fanLabel()}）`, ...lines].join("\n");
+        try {
+          await navigator.clipboard.writeText(text);
+          showToast("已复制到剪贴板");
+        } catch {
+          showToast("复制失败，请手动截图");
+        }
+      });
+      document.getElementById("hangla-again")?.addEventListener("click", () => {
+        if (!startRound()) return;
+        paint("play");
+      });
+      document.getElementById("hangla-reset")?.addEventListener("click", () => {
+        state = null;
+        paint("setup");
+      });
+      return;
+    }
+
+    const current = blind ? findArtist(state.field, state.current) : null;
+    if (blind && state.current) selectedId = state.current;
+
+    const poolBlock = blind
+      ? `
+        <div class="hangla-pool-wrap hangla-blind-wrap">
+          <div class="hangla-section-label">
+            当前翻牌 ${progress.placed + (state.current ? 1 : 0)} / ${progress.total}
+            ${state.queue?.length ? ` · 后面还藏着 ${state.queue.length} 位` : ""}
+          </div>
+          <div class="hangla-blind-stage" id="hangla-pool">
+            ${
+              state.current
+                ? hangLaBlindCard(current)
+                : `<p class="hangla-empty">15 位都排完了，可以出结果</p>`
+            }
+            ${
+              state.queue?.length
+                ? `<div class="hangla-blind-stack" aria-hidden="true">${Array.from(
+                    { length: Math.min(5, state.queue.length) },
+                    () => `<span class="hangla-blind-back">?</span>`
+                  ).join("")}</div>`
+                : ""
+            }
+          </div>
+          <p class="hangla-setup-hint">直接点下方档位放入当前这位 · 下一位才会揭晓</p>
+        </div>`
+      : `
+        <div class="hangla-pool-wrap">
+          <div class="hangla-section-label">待分配 ${state.pool.length}</div>
+          <div class="hangla-pool" id="hangla-pool">
+            ${
+              state.pool.length
+                ? state.pool
+                    .map((id) => hangLaChip(findArtist(state.field, id), { selected: id === selectedId }))
+                    .join("")
+                : `<p class="hangla-empty">全部就位，可以出结果了</p>`
+            }
+          </div>
+        </div>`;
+
+    app.innerHTML = shell(
+      `
+      <section class="hangla-screen${blind ? " is-blind" : ""}">
+        <header class="hangla-head">
+          <h1>从夯到拉${blind ? " · 盲排" : ""}</h1>
+          <p>${
+            blind
+              ? `粉丝门槛 ${esc(fanLabel())} · 一次只亮一位 · 「夯」最多 2 人 · 进度 ${progress.placed} / ${progress.total}`
+              : `粉丝门槛 ${esc(fanLabel())} · 先点人再点档位 · 「夯」最多 2 人 · 进度 ${progress.placed} / ${progress.total}`
+          }</p>
+        </header>
+
+        ${poolBlock}
+
+        <div class="hangla-tiers" id="hangla-tiers">
+          ${HANG_LA_TIERS.map((t) => {
+            const ids = state.tiers[t.id] || [];
+            const dropHint = blind
+              ? state.current
+                ? "点这里放入当前这位"
+                : "已排完"
+              : selectedId
+                ? "点这里放入"
+                : "先选待分配的人";
+            return `
+              <button type="button" class="hangla-tier tier-${t.id}" data-tier="${t.id}">
+                <div class="hangla-tier-head">
+                  <strong>${esc(t.label)}</strong>
+                  <span>${ids.length}${t.max < Infinity ? ` / ${t.max}` : ""}${t.hint ? ` · ${esc(t.hint)}` : ""}</span>
+                </div>
+                <div class="hangla-tier-body">
+                  ${
+                    ids.length
+                      ? ids
+                          .map((id) =>
+                            hangLaChip(findArtist(state.field, id), {
+                              selected: !blind && id === selectedId,
+                              inTier: true,
+                            })
+                          )
+                          .join("")
+                      : `<span class="hangla-drop-hint">${dropHint}</span>`
+                  }
+                </div>
+              </button>`;
+          }).join("")}
+        </div>
+
+        <div class="hangla-actions">
+          <button type="button" class="primary-btn" id="hangla-finish" ${progress.done ? "" : "disabled"}>完成排行</button>
+          <button type="button" class="ghost-btn" id="hangla-redraw">同一设置再抽</button>
+          <button type="button" class="ghost-btn" id="hangla-reset">改设置</button>
+          ${
+            blind
+              ? ""
+              : `<button type="button" class="ghost-btn" id="hangla-clear" ${selectedId ? "" : "hidden"}>取消选中</button>`
+          }
+        </div>
+        <p class="hangla-toast" id="hangla-toast" role="status"></p>
+      </section>
+    `,
+      { back: "/" }
+    );
+    bindBack();
+
+    const placeSelected = (tierId, rowEl) => {
+      const id = blind ? state.current : selectedId;
+      if (!id) {
+        showToast(blind ? "已经排完了" : "先点一位 Rapper");
+        return;
+      }
+      const res = placeArtist(state, id, tierId);
+      if (!res.ok) {
+        showToast(res.error || "放不下");
+        rowEl?.classList.add("is-shake");
+        setTimeout(() => rowEl?.classList.remove("is-shake"), 420);
+        return;
+      }
+      state = res.state;
+      selectedId = blind ? state.current : null;
+      paint("play");
+    };
+
+    if (!blind) {
+      const pick = (id) => {
+        selectedId = selectedId === id ? null : id;
+        paint("play");
+      };
+      app.querySelectorAll("[data-hangla-id]").forEach((btn) => {
+        btn.addEventListener("click", (e) => {
+          e.stopPropagation();
+          pick(btn.dataset.hanglaId);
+        });
+      });
+      document.getElementById("hangla-pool")?.addEventListener("click", (e) => {
+        if (e.target.closest("[data-hangla-id]")) return;
+        if (!selectedId) return;
+        const res = placeArtist(state, selectedId, "pool");
+        if (res.ok) {
+          state = res.state;
+          selectedId = null;
+          paint("play");
+        }
+      });
+      document.getElementById("hangla-clear")?.addEventListener("click", () => {
+        selectedId = null;
+        paint("play");
+      });
+    } else {
+      // Blind: chips in tiers are display-only
+      app.querySelectorAll(".hangla-tier .hangla-chip").forEach((btn) => {
+        btn.addEventListener("click", (e) => e.stopPropagation());
+      });
+    }
+
+    app.querySelectorAll("[data-tier]").forEach((row) => {
+      row.addEventListener("click", () => placeSelected(row.dataset.tier, row));
+    });
+
+    document.getElementById("hangla-redraw")?.addEventListener("click", () => {
+      if (!startRound()) return;
+      paint("play");
+    });
+
+    document.getElementById("hangla-reset")?.addEventListener("click", () => {
+      state = null;
+      selectedId = null;
+      paint("setup");
+    });
+
+    document.getElementById("hangla-finish")?.addEventListener("click", () => {
+      if (!hangLaProgress(state).done) {
+        showToast("还有人没分完档");
+        return;
+      }
+      paint("done");
+    });
+  };
+
+  paint("setup");
+}
+
+async function renderSetup(artistId) {
+  const base = getArtist(artistId);
+  if (!base) {
+    app.innerHTML = shell(
+      `<section class="setup"><p class="loading-line">名单里没有这位歌手</p></section>`,
+      { back: "/" }
+    );
+    bindBack();
+    return;
+  }
+
+  app.innerHTML = shell(
+    `<section class="setup"><p class="loading-line">正在拉取「${esc(base.name)}」热门…</p></section>`,
+    { back: "/" }
+  );
+  bindBack();
+
+  let artist;
+  try {
+    const online = await pingApi();
+    if (!online) {
+      throw new Error("连不上音乐接口，请先启动本地服务后再刷新");
+    }
+    artist = await hydrateArtist(artistId);
+  } catch (e) {
+    app.innerHTML = shell(
+      `<section class="setup"><p class="loading-line">拉取失败：${esc(e.message || e)}</p></section>`,
+      { back: "/" }
+    );
+    bindBack();
+    return;
+  }
+
+  const fieldSize = nearestFieldSize(Math.min(artist.songs.length, FIELD_MAX), { max: FIELD_MAX });
+  let mode = "battle";
+  let fieldSongs = buildField(artist.songs, { mode, max: FIELD_MAX });
+
+  const paint = () => {
+    const preview = fieldSongs;
+
+    app.innerHTML = shell(
+      `
+      <section class="setup">
+        <div class="setup-head setup-head-with-avatar">
+          ${imgTag(artist.avatar, { alt: artist.name, className: "setup-avatar" })}
+          <div>
+            <h1>${esc(artist.name)}</h1>
+            <p>${esc(artist.city)} · ${esc(artist.tag)} · 热门 ${artist.songs.length} 首 · ${fieldSize} 强</p>
+          </div>
+        </div>
+        <div class="section-title">对阵玩法</div>
+        <div class="mode-row">
+          <button type="button" class="mode-chip ${mode === "battle" ? "active" : ""}" data-mode="battle">1v1 Battle</button>
+          <button type="button" class="mode-chip ${mode === "hot" ? "active" : ""}" data-mode="hot">热门顺序</button>
+        </div>
+        <div class="setup-actions">
+          <button type="button" class="primary-btn" id="start-btn">一键开赛 · ${fieldSize} 强</button>
+          ${
+            mode === "battle"
+              ? `<button type="button" class="ghost-btn" id="reshuffle-btn">再打乱一次</button>`
+              : ""
+          }
+        </div>
+        <div class="section-title">参赛签表（${fieldSize} / Top ${artist.songs.length}）</div>
+        <ul class="song-preview">
+          ${preview
+            .map(
+              (s, i) => `
+              <li>
+                ${imgTag(coverUrl(s, artist.avatar), { alt: s.title, className: "song-cover" })}
+                <span class="song-preview-text">
+                  <strong>${i + 1}. ${esc(s.title)}</strong>
+                  <em>${esc(s.album || "单曲")}${
+                    mode === "battle" && i % 2 === 0 && preview[i + 1]
+                      ? ` · vs ${esc(preview[i + 1].title)}`
+                      : ""
+                  }</em>
+                </span>
+              </li>`
+            )
+            .join("")}
+        </ul>
+      </section>
+    `,
+      { back: "/" }
+    );
+    bindBack();
+
+    app.querySelectorAll("[data-mode]").forEach((chip) => {
+      chip.addEventListener("click", () => {
+        mode = chip.dataset.mode;
+        fieldSongs = buildField(artist.songs, { mode, max: FIELD_MAX });
+        paint();
+      });
+    });
+
+    document.getElementById("reshuffle-btn")?.addEventListener("click", () => {
+      fieldSongs = buildField(artist.songs, { mode: "battle", max: FIELD_MAX });
+      paint();
+    });
+
+    document.getElementById("start-btn").addEventListener("click", () => {
+      const bracket = buildBracket(artist.songs, {
+        mode,
+        max: FIELD_MAX,
+        field: fieldSongs,
+      });
+      saveState({
+        artistId: artist.id,
+        artistName: artist.name,
+        artistAvatar: artist.avatar || "",
+        neteaseArtistId: artist.neteaseArtistId || "",
+        bracket,
+      });
+      navigate("/bracket");
+    });
+  };
+
+  paint();
+}
+
+function songKey(song) {
+  if (!song) return "";
+  return String(song.id || song.neteaseId || song.title || "");
+}
+
+function isSameSong(a, b) {
+  const ka = songKey(a);
+  const kb = songKey(b);
+  return Boolean(ka && kb && ka === kb);
+}
+
+function bracketSlot(song, fallbackAvatar, { onPath = false, roundIndex = -1, wing = "" } = {}) {
+  if (!song) {
+    return `<div class="bracket-slot is-empty"><span>待定</span></div>`;
+  }
+  const pathCls = onPath ? " on-path" : "";
+  const pathAttrs = onPath
+    ? ` data-path-round="${roundIndex}" data-path-wing="${esc(wing)}"`
+    : "";
+  return `
+    <div class="bracket-slot${pathCls}" title="${esc(song.title)}"${pathAttrs}>
+      ${imgTag(coverUrl(song, fallbackAvatar), { alt: song.title, className: "bracket-slot-cover" })}
+      <span class="bracket-slot-title">${esc(song.title)}</span>
+    </div>
+  `;
+}
+
+function shortRoundLabel(size, roundIndex) {
+  const remaining = size / 2 ** roundIndex;
+  if (remaining === 2) return "决赛";
+  if (remaining === 4) return "半决赛";
+  if (remaining === 8) return "8强";
+  return `${remaining}强`;
+}
+
+function renderRoundColumn(matches, label, side, fallbackAvatar, champ, roundIndex) {
+  return `
+    <div class="bracket-round" data-side="${side}" data-round="${roundIndex}">
+      <div class="bracket-round-label">${esc(label)}</div>
+      <div class="bracket-round-matches">
+        ${matches
+          .map(
+            (m) => `
+            <div class="bracket-match${
+              champ && (isSameSong(m.a, champ) || isSameSong(m.b, champ)) ? " has-path" : ""
+            }">
+              ${bracketSlot(m.a, fallbackAvatar, {
+                onPath: isSameSong(m.a, champ),
+                roundIndex,
+                wing: side,
+              })}
+              ${bracketSlot(m.b, fallbackAvatar, {
+                onPath: isSameSong(m.b, champ),
+                roundIndex,
+                wing: side,
+              })}
+            </div>`
+          )
+          .join("")}
+      </div>
+    </div>
+  `;
+}
+
+function renderBracketHtml(bracket, fallbackAvatar) {
+  const rounds = bracket.rounds;
+  const finalIndex = rounds.length - 1;
+  const finalRound = rounds[finalIndex] || [];
+  const feederCount = Math.max(0, finalIndex);
+  const champ = bracket.champion || null;
+  const pathClass = champ ? " has-champ-path" : "";
+
+  const leftCols = [];
+  const rightCols = [];
+  for (let ri = 0; ri < feederCount; ri++) {
+    const round = rounds[ri] || [];
+    const mid = Math.ceil(round.length / 2);
+    const leftMatches = round.slice(0, mid);
+    const rightMatches = round.slice(mid);
+    const label = shortRoundLabel(bracket.size, ri);
+    leftCols.push(renderRoundColumn(leftMatches, label, "left", fallbackAvatar, champ, ri));
+    rightCols.unshift(renderRoundColumn(rightMatches, label, "right", fallbackAvatar, champ, ri));
+  }
+
+  const finalMatch = finalRound[0] || { a: null, b: null };
+  const artistBg = fallbackAvatar
+    ? `--artist-bg:url('${String(fallbackAvatar).replace(/'/g, "%27")}');`
+    : "";
+
+  const champHero = champ
+    ? `
+      <div
+        class="bracket-champ-hero"
+        data-path-round="${finalIndex + 1}"
+        data-path-wing="champ"
+      >
+        <div class="champ-hero-aura" aria-hidden="true"></div>
+        <div class="champ-hero-orbit" aria-hidden="true"></div>
+        <div class="champ-hero-cover-wrap">
+          ${imgTag(coverUrl(champ, fallbackAvatar), {
+            alt: champ.title,
+            className: "champ-hero-cover",
+          })}
+          <span class="champ-hero-crown" aria-hidden="true">♛</span>
+        </div>
+        <div class="champ-hero-badge">冠军 · CHAMPION</div>
+        <div class="champ-hero-title">${esc(champ.title)}</div>
+        <div class="champ-hero-meta">${esc(metaLine(champ) || "")}</div>
+      </div>`
+    : `
+      <div class="bracket-champ">
+        <div class="bracket-round-label">冠军</div>
+        <div class="bracket-slot is-empty champ-slot"><span>本命曲</span></div>
+      </div>`;
+
+  return `
+    <div class="bracket-fit" id="bracket-fit">
+      <div class="bracket-board is-split${pathClass} ${fallbackAvatar ? "has-center-bg" : ""}" id="bracket-board" style="--feeders:${feederCount};${artistBg}">
+        <div class="bracket-wing bracket-wing-left">
+          ${leftCols.join("")}
+        </div>
+        <div class="bracket-center${champ ? " is-hero" : ""}">
+          <div class="bracket-round-label">决赛</div>
+          <div class="bracket-match bracket-final${
+            champ && (isSameSong(finalMatch.a, champ) || isSameSong(finalMatch.b, champ))
+              ? " has-path"
+              : ""
+          }">
+            ${bracketSlot(finalMatch.a, fallbackAvatar, {
+              onPath: isSameSong(finalMatch.a, champ),
+              roundIndex: finalIndex,
+              wing: "center",
+            })}
+            ${bracketSlot(finalMatch.b, fallbackAvatar, {
+              onPath: isSameSong(finalMatch.b, champ),
+              roundIndex: finalIndex,
+              wing: "center",
+            })}
+          </div>
+          ${champHero}
+        </div>
+        <div class="bracket-wing bracket-wing-right">
+          ${rightCols.join("")}
+        </div>
+      </div>
+    </div>
+  `;
+}
+
+/** Box relative to board, undoing CSS transform:scale on the board. */
+function boxInBoard(el, board) {
+  const er = el.getBoundingClientRect();
+  const br = board.getBoundingClientRect();
+  const sx = board.offsetWidth / Math.max(br.width, 1);
+  const sy = board.offsetHeight / Math.max(br.height, 1);
+  return {
+    x: (er.left - br.left) * sx,
+    y: (er.top - br.top) * sy,
+    w: er.width * sx,
+    h: er.height * sy,
+  };
+}
+
+/** Draw glowing polyline chain along champion path slots. */
+function drawChampionPathChain(board) {
+  if (!board?.classList.contains("has-champ-path")) return;
+  board.querySelector(".path-chain-svg")?.remove();
+
+  const slots = [...board.querySelectorAll("[data-path-wing]")];
+  if (slots.length < 2) return;
+
+  const scored = slots.map((el) => {
+    const round = Number(el.dataset.pathRound ?? -1);
+    const wing = el.dataset.pathWing || "";
+    const box = boxInBoard(el, board);
+    return { el, round, wing, box };
+  });
+  scored.sort((a, b) => a.round - b.round || a.box.y - b.box.y);
+
+  const W = board.offsetWidth;
+  const H = board.offsetHeight;
+  const ns = "http://www.w3.org/2000/svg";
+  const svg = document.createElementNS(ns, "svg");
+  svg.setAttribute("class", "path-chain-svg");
+  svg.setAttribute("viewBox", `0 0 ${W} ${H}`);
+  svg.setAttribute("width", String(W));
+  svg.setAttribute("height", String(H));
+  svg.setAttribute("aria-hidden", "true");
+
+  const defs = document.createElementNS(ns, "defs");
+  defs.innerHTML = `
+    <filter id="champ-path-glow" x="-40%" y="-40%" width="180%" height="180%">
+      <feGaussianBlur stdDeviation="1.2" result="blur"/>
+      <feMerge>
+        <feMergeNode in="blur"/>
+        <feMergeNode in="SourceGraphic"/>
+      </feMerge>
+    </filter>
+    <linearGradient id="champ-path-grad" x1="0%" y1="0%" x2="100%" y2="0%">
+      <stop offset="0%" stop-color="#c6e86a" stop-opacity="0.55"/>
+      <stop offset="50%" stop-color="#b8ff1a" stop-opacity="0.7"/>
+      <stop offset="100%" stop-color="#8fbf20" stop-opacity="0.55"/>
+    </linearGradient>
+  `;
+  svg.appendChild(defs);
+
+  const anchor = (item, towardNext) => {
+    const { box, wing } = item;
+    const cy = box.y + box.h / 2;
+    if (wing === "left") {
+      return towardNext ? { x: box.x + box.w, y: cy } : { x: box.x, y: cy };
+    }
+    if (wing === "right") {
+      return towardNext ? { x: box.x, y: cy } : { x: box.x + box.w, y: cy };
+    }
+    // center / champ: connect from top/bottom or sides toward previous
+    if (wing === "champ") {
+      // connect into top-center of big cover
+      const cover = item.el.querySelector?.(".champ-hero-cover-wrap") || item.el;
+      const cb = cover === item.el ? item.box : boxInBoard(cover, board);
+      return { x: cb.x + cb.w / 2, y: cb.y };
+    }
+    // final center slot → point toward champ (down) or previous (side)
+    return towardNext
+      ? { x: box.x + box.w / 2, y: box.y + box.h }
+      : { x: box.x + box.w / 2, y: box.y + box.h / 2 };
+  };
+
+  for (let i = 0; i < scored.length - 1; i++) {
+    const a = scored[i];
+    const b = scored[i + 1];
+    const p1 = anchor(a, true);
+    const p2 = anchor(b, false);
+
+    // Adjust center→champ and feeder→final anchors
+    let x1 = p1.x;
+    let y1 = p1.y;
+    let x2 = p2.x;
+    let y2 = p2.y;
+
+    if (a.wing === "left" && (b.wing === "center" || b.wing === "champ")) {
+      x1 = a.box.x + a.box.w;
+      y1 = a.box.y + a.box.h / 2;
+      x2 = b.box.x;
+      y2 = b.box.y + b.box.h / 2;
+    } else if (a.wing === "right" && (b.wing === "center" || b.wing === "champ")) {
+      x1 = a.box.x;
+      y1 = a.box.y + a.box.h / 2;
+      x2 = b.box.x + b.box.w;
+      y2 = b.box.y + b.box.h / 2;
+    } else if (a.wing === "center" && b.wing === "champ") {
+      const cover = b.el.querySelector?.(".champ-hero-cover-wrap");
+      const cb = cover ? boxInBoard(cover, board) : b.box;
+      x1 = a.box.x + a.box.w / 2;
+      y1 = a.box.y + a.box.h;
+      x2 = cb.x + cb.w / 2;
+      y2 = cb.y;
+    } else if ((a.wing === "left" || a.wing === "right") && b.wing === "champ") {
+      const cover = b.el.querySelector?.(".champ-hero-cover-wrap");
+      const cb = cover ? boxInBoard(cover, board) : b.box;
+      if (a.wing === "left") {
+        x1 = a.box.x + a.box.w;
+        y1 = a.box.y + a.box.h / 2;
+        x2 = cb.x;
+        y2 = cb.y + cb.h / 2;
+      } else {
+        x1 = a.box.x;
+        y1 = a.box.y + a.box.h / 2;
+        x2 = cb.x + cb.w;
+        y2 = cb.y + cb.h / 2;
+      }
+    } else if (a.wing === "left" && b.wing === "left") {
+      x1 = a.box.x + a.box.w;
+      y1 = a.box.y + a.box.h / 2;
+      x2 = b.box.x;
+      y2 = b.box.y + b.box.h / 2;
+    } else if (a.wing === "right" && b.wing === "right") {
+      x1 = a.box.x;
+      y1 = a.box.y + a.box.h / 2;
+      x2 = b.box.x + b.box.w;
+      y2 = b.box.y + b.box.h / 2;
+    }
+
+    const mx = (x1 + x2) / 2;
+    const d = `M ${x1.toFixed(1)} ${y1.toFixed(1)} L ${mx.toFixed(1)} ${y1.toFixed(1)} L ${mx.toFixed(1)} ${y2.toFixed(1)} L ${x2.toFixed(1)} ${y2.toFixed(1)}`;
+
+    const glow = document.createElementNS(ns, "path");
+    glow.setAttribute("d", d);
+    glow.setAttribute("class", "path-chain-glow");
+    glow.setAttribute("fill", "none");
+    svg.appendChild(glow);
+
+    const line = document.createElementNS(ns, "path");
+    line.setAttribute("d", d);
+    line.setAttribute("class", "path-chain-line");
+    line.setAttribute("fill", "none");
+    line.setAttribute("filter", "url(#champ-path-glow)");
+    svg.appendChild(line);
+  }
+
+  board.appendChild(svg);
+}
+
+function fitBracketToScreen() {
+  const fit = document.getElementById("bracket-fit");
+  const board = document.getElementById("bracket-board");
+  if (!fit || !board) return;
+
+  board.style.transform = "none";
+
+  const availW = fit.clientWidth;
+  const availH = fit.clientHeight || Math.max(320, window.innerHeight - 200);
+  const needW = Math.max(board.scrollWidth, 1);
+  const needH = Math.max(board.scrollHeight, 1);
+  // Fill the available area (scale up or down)
+  const scale = Math.min(availW / needW, availH / needH) * 0.98;
+
+  board.style.transformOrigin = "center center";
+  board.style.transform = `scale(${scale})`;
+  requestAnimationFrame(() => drawChampionPathChain(board));
+}
+
+function renderBracketPreview(state) {
+  const avatar = state.artistAvatar || "";
+  const size = state.bracket.size;
+  let cancelled = false;
+  let timer = null;
+
+  app.innerHTML = shell(
+    `
+    <section class="bracket-preview">
+      <div class="bracket-preview-head">
+        ${imgTag(avatar, { alt: state.artistName, className: "setup-avatar" })}
+        <div class="bracket-preview-copy">
+          <h1 class="bracket-title-fx"><span class="rapper-name">${esc(state.artistName)} · ${size} 强对阵图</span></h1>
+        </div>
+      </div>
+      ${renderBracketHtml(state.bracket, avatar)}
+      <div class="countdown-overlay" id="countdown-overlay" aria-live="polite">
+        <div class="countdown-num" id="countdown-num">3</div>
+      </div>
+      <div class="setup-actions bracket-actions">
+        <button type="button" class="ghost-btn" id="back-setup">返回调整签表</button>
+      </div>
+    </section>
+  `,
+    { back: `/artist/${state.artistId}`, wide: true }
+  );
+  bindBack();
+
+  const cleanup = () => {
+    cancelled = true;
+    if (timer) clearTimeout(timer);
+    window.removeEventListener("resize", runFit);
+  };
+
+  const runFit = () => fitBracketToScreen();
+  requestAnimationFrame(() => {
+    runFit();
+    requestAnimationFrame(runFit);
+  });
+  const board = document.getElementById("bracket-board");
+  board?.querySelectorAll("img").forEach((img) => {
+    if (!img.complete) img.addEventListener("load", runFit, { once: true });
+  });
+  window.addEventListener("resize", runFit, { passive: true });
+
+  document.getElementById("back-setup").addEventListener("click", () => {
+    cleanup();
+    clearState();
+    navigate(`/artist/${state.artistId}`);
+  });
+
+  const steps = ["3", "2", "1", "GO"];
+  let i = 0;
+  const numEl = document.getElementById("countdown-num");
+  const tick = () => {
+    if (cancelled) return;
+    if (i >= steps.length) {
+      cleanup();
+      navigate("/play");
+      return;
+    }
+    if (numEl) {
+      numEl.textContent = steps[i];
+      numEl.classList.remove("pop");
+      void numEl.offsetWidth;
+      numEl.classList.add("pop");
+    }
+    i += 1;
+    timer = setTimeout(tick, i === steps.length ? 480 : 820);
+  };
+  timer = setTimeout(tick, 350);
+}
+
+function renderMatch(state) {
+  const match = currentMatch(state.bracket);
+  if (!match) {
+    if (state.bracket.champion) {
+      navigate("/champ");
+      return;
+    }
+    app.innerHTML = shell(`<p>赛程异常，请重新开赛。</p>`, { back: "/" });
+    bindBack();
+    return;
+  }
+
+  const label = roundLabel(state.bracket, match);
+  const avatar = state.artistAvatar || "";
+  app.innerHTML = shell(
+    `
+    <section class="match-screen">
+      <div class="match-meta">
+        ${imgTag(avatar, { alt: state.artistName, className: "match-artist-avatar" })}
+        <div>
+          <strong>${esc(label)}</strong>
+          <div class="match-meta-sub">
+            <span>${esc(state.artistName)}</span>
+            <span>进度 ${progressText(state.bracket)}</span>
+          </div>
+        </div>
+      </div>
+      <div class="vs-grid">
+        ${pickButton("a", match.a, avatar)}
+        <div class="vs-mark">VS</div>
+        ${pickButton("b", match.b, avatar)}
+      </div>
+      <div id="player-mount" class="player-mount"></div>
+    </section>
+  `,
+    { back: `/artist/${state.artistId}` }
+  );
+  bindBack();
+
+  const player = createPlayer(document.getElementById("player-mount"));
+
+  app.querySelectorAll("[data-preview]").forEach((btn) => {
+    btn.addEventListener("click", (e) => {
+      e.stopPropagation();
+      const side = btn.dataset.preview;
+      const song = side === "a" ? match.a : match.b;
+      player.load(song, { autoplay: true });
+    });
+  });
+
+  app.querySelectorAll("[data-side]").forEach((btn) => {
+    btn.addEventListener("click", (e) => {
+      // ignore clicks that bubbled from preview
+      if (e.target.closest("[data-preview]")) return;
+      player.stop();
+      const roundIdx = findRoundIndex(state.bracket, match.id);
+      const nextBracket = chooseWinner(state.bracket, match.id, btn.dataset.side);
+      const next = { ...state, bracket: nextBracket };
+      saveState(next);
+      if (nextBracket.champion) {
+        showRoundSplash(
+          {
+            title: "冠军诞生",
+            sub: `${nextBracket.champion.title} · ${state.artistName} 本命曲加冕`,
+          },
+          () => navigate("/champ")
+        );
+        return;
+      }
+      // 本轮全部打完 → 弹出下一轮环节动画（32→16、16→8…）
+      if (roundIdx >= 0 && isRoundComplete(nextBracket, roundIdx)) {
+        const splash = splashForBracket(nextBracket);
+        if (splash) {
+          showRoundSplash(splash, () => renderMatch(next));
+          return;
+        }
+      }
+      renderMatch(next);
+    });
+  });
+}
+
+function showRoundSplash({ title, sub }, onDone) {
+  const existing = document.getElementById("round-splash");
+  if (existing) existing.remove();
+
+  const el = document.createElement("div");
+  el.id = "round-splash";
+  el.className = "round-splash";
+  el.setAttribute("role", "dialog");
+  el.setAttribute("aria-live", "polite");
+  el.innerHTML = `
+    <div class="round-splash-bg" aria-hidden="true"></div>
+    <div class="round-splash-card">
+      <div class="round-splash-badge">真黑怕巅峰对决</div>
+      <h2 class="round-splash-title">${esc(title)}</h2>
+      <p class="round-splash-sub">${esc(sub)}</p>
+    </div>
+  `;
+  document.body.appendChild(el);
+  requestAnimationFrame(() => el.classList.add("is-on"));
+
+  let done = false;
+  let auto = null;
+  function finish() {
+    if (done) return;
+    done = true;
+    if (auto) clearTimeout(auto);
+    el.classList.remove("is-on");
+    el.classList.add("is-out");
+    setTimeout(() => {
+      el.remove();
+      onDone?.();
+    }, 320);
+  }
+
+  el.addEventListener("click", finish);
+  auto = setTimeout(finish, 2200);
+}
+
+function podiumCard(label, en, song, fallback) {
+  if (!song) {
+    return `
+      <div class="podium-card is-empty">
+        <div class="podium-label">${esc(label)} · ${esc(en)}</div>
+        <div class="podium-title">—</div>
+      </div>
+    `;
+  }
+  return `
+    <div class="podium-card">
+      ${imgTag(coverUrl(song, fallback), { alt: song.title, className: "podium-cover" })}
+      <div class="podium-copy">
+        <div class="podium-label">${esc(label)} · ${esc(en)}</div>
+        <div class="podium-title">${esc(song.title)}</div>
+      </div>
+    </div>
+  `;
+}
+
+function openShareBracket(state) {
+  const existing = document.getElementById("share-bracket");
+  if (existing) existing.remove();
+
+  const avatar = state.artistAvatar || "";
+  const c = state.bracket.champion;
+  const el = document.createElement("div");
+  el.id = "share-bracket";
+  el.className = "share-bracket";
+  el.innerHTML = `
+    <div class="share-bracket-panel">
+      <header class="share-bracket-head">
+        <div>
+          <h2>${esc(state.artistName)} · ${state.bracket.size} 强对阵图</h2>
+          <p class="share-bracket-champ-line">冠军 · ${esc(c?.title || "")}</p>
+        </div>
+        <div class="share-bracket-actions">
+          <button type="button" class="primary-btn" id="share-save-btn">保存图片</button>
+          <button type="button" class="ghost-btn" id="share-close-btn">关闭</button>
+        </div>
+      </header>
+      <div class="share-bracket-stage" id="share-bracket-capture">
+        <div class="share-bracket-brand">真黑怕巅峰对决</div>
+        ${renderBracketHtml(state.bracket, avatar)}
+      </div>
+    </div>
+  `;
+  document.body.appendChild(el);
+  const fitShare = () => {
+    const fit = el.querySelector("#bracket-fit");
+    const board = el.querySelector("#bracket-board");
+    if (!fit || !board) return;
+    board.style.transform = "none";
+    const availW = fit.clientWidth;
+    const availH = fit.clientHeight || Math.max(280, window.innerHeight * 0.62);
+    const scale =
+      Math.min(availW / Math.max(board.scrollWidth, 1), availH / Math.max(board.scrollHeight, 1)) * 0.96;
+    board.style.transformOrigin = "center center";
+    board.style.transform = `scale(${scale})`;
+    requestAnimationFrame(() => drawChampionPathChain(board));
+  };
+  requestAnimationFrame(() => {
+    el.classList.add("is-on");
+    fitShare();
+    requestAnimationFrame(fitShare);
+  });
+  el.querySelectorAll("img").forEach((img) => {
+    if (!img.complete) img.addEventListener("load", fitShare, { once: true });
+  });
+  window.addEventListener("resize", fitShare, { passive: true });
+
+  const close = () => {
+    window.removeEventListener("resize", fitShare);
+    el.classList.remove("is-on");
+    setTimeout(() => el.remove(), 280);
+  };
+  el.querySelector("#share-close-btn").addEventListener("click", close);
+  el.addEventListener("click", (e) => {
+    if (e.target === el) close();
+  });
+
+  el.querySelector("#share-save-btn").addEventListener("click", async () => {
+    const btn = el.querySelector("#share-save-btn");
+    btn.disabled = true;
+    btn.textContent = "生成中…";
+    try {
+      await downloadShareCard(state);
+      btn.textContent = "已保存";
+    } catch {
+      btn.textContent = "请直接截图";
+    }
+    setTimeout(() => {
+      btn.disabled = false;
+      btn.textContent = "保存图片";
+    }, 1600);
+  });
+}
+
+/** Draw a shareable PNG card (no remote images — avoids canvas CORS taint). */
+async function downloadShareCard(state) {
+  const { champion, runnerUp, semis } = podiumFromBracket(state.bracket);
+  const W = 1080;
+  const H = 1520;
+  const canvas = document.createElement("canvas");
+  canvas.width = W;
+  canvas.height = H;
+  const ctx = canvas.getContext("2d");
+
+  const g = ctx.createLinearGradient(0, 0, W, H);
+  g.addColorStop(0, "#eceae4");
+  g.addColorStop(1, "#d2cec6");
+  ctx.fillStyle = g;
+  ctx.fillRect(0, 0, W, H);
+
+  ctx.fillStyle = "#111110";
+  ctx.font = "600 28px Noto Sans SC, sans-serif";
+  ctx.fillText("真黑怕巅峰对决", 72, 90);
+  ctx.font = "400 34px Noto Sans SC, sans-serif";
+  ctx.fillStyle = "#5c5a55";
+  ctx.fillText(`${state.artistName} · 冠军诞生`, 72, 140);
+
+  // champion block
+  ctx.fillStyle = "#b8ff1a";
+  roundRect(ctx, 72, 180, W - 144, 280, 16);
+  ctx.fill();
+  ctx.fillStyle = "#111110";
+  ctx.font = "700 42px Bebas Neue, sans-serif";
+  ctx.fillText("CHAMPION", 104, 250);
+  ctx.font = "700 64px Noto Sans SC, sans-serif";
+  const champTitle = champion?.title || "";
+  ctx.fillText(champTitle.length > 14 ? `${champTitle.slice(0, 14)}…` : champTitle, 104, 340);
+  ctx.font = "400 28px Noto Sans SC, sans-serif";
+  ctx.fillStyle = "#333";
+  ctx.fillText(metaLine(champion) || state.artistName, 104, 400);
+
+  // podium
+  const cards = [
+    { label: "亚军 · RUNNER-UP", song: runnerUp },
+    { label: "四强 · SEMI", song: semis[0] },
+    { label: "四强 · SEMI", song: semis[1] },
+  ];
+  cards.forEach((card, i) => {
+    const x = 72 + i * 330;
+    const y = 500;
+    ctx.fillStyle = "rgba(255,255,255,0.78)";
+    roundRect(ctx, x, y, 300, 140, 12);
+    ctx.fill();
+    ctx.fillStyle = "#5c5a55";
+    ctx.font = "600 18px Noto Sans SC, sans-serif";
+    ctx.fillText(card.label, x + 24, y + 48);
+    ctx.fillStyle = "#111110";
+    ctx.font = "700 28px Noto Sans SC, sans-serif";
+    const t = card.song?.title || "—";
+    ctx.fillText(t.length > 9 ? `${t.slice(0, 9)}…` : t, x + 24, y + 98);
+  });
+
+  // 晋级之路（完整签表视觉在分享弹层里截图）
+  ctx.fillStyle = "#111110";
+  ctx.font = "700 28px Noto Sans SC, sans-serif";
+  ctx.fillText("晋级之路", 72, 710);
+
+  const path = uniquePath(state.bracket.path || [], champion);
+  let y = 760;
+  path.forEach((s, i) => {
+    const mark = i === path.length - 1 ? "👑 " : `${i + 1}. `;
+    ctx.fillStyle = i === path.length - 1 ? "#111110" : "#5c5a55";
+    ctx.font = `${i === path.length - 1 ? "700" : "400"} 26px Noto Sans SC, sans-serif`;
+    const t = `${mark}${s.title}`;
+    ctx.fillText(t.length > 28 ? `${t.slice(0, 28)}…` : t, 96, y);
+    y += 40;
+  });
+
+  ctx.fillStyle = "#5c5a55";
+  ctx.font = "400 22px Noto Sans SC, sans-serif";
+  ctx.fillText(`${state.bracket.size} 强 · ${progressText(state.bracket)}`, 72, H - 48);
+
+  const blob = await new Promise((resolve, reject) => {
+    try {
+      canvas.toBlob((b) => (b ? resolve(b) : reject(new Error("toBlob failed"))), "image/png");
+    } catch (err) {
+      reject(err);
+    }
+  });
+
+  const fileName = `${state.artistName}-本命曲对阵图.png`;
+  if (navigator.share && navigator.canShare) {
+    const file = new File([blob], fileName, { type: "image/png" });
+    if (navigator.canShare({ files: [file] })) {
+      try {
+        await navigator.share({
+          files: [file],
+          title: `${state.artistName} 本命曲对阵图`,
+          text: `冠军：${champion?.title || ""}`,
+        });
+        return;
+      } catch {
+        /* fall through */
+      }
+    }
+  }
+
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement("a");
+  a.href = url;
+  a.download = fileName;
+  a.click();
+  URL.revokeObjectURL(url);
+}
+
+function roundRect(ctx, x, y, w, h, r) {
+  const rr = Math.min(r, w / 2, h / 2);
+  ctx.beginPath();
+  ctx.moveTo(x + rr, y);
+  ctx.arcTo(x + w, y, x + w, y + h, rr);
+  ctx.arcTo(x + w, y + h, x, y + h, rr);
+  ctx.arcTo(x, y + h, x, y, rr);
+  ctx.arcTo(x, y, x + w, y, rr);
+  ctx.closePath();
+}
+
+function pickButton(side, song, fallback) {
+  return `
+    <div class="pick-wrap">
+      <button type="button" class="pick" data-side="${side}">
+        ${imgTag(coverUrl(song, fallback), { alt: song.title, className: "pick-cover" })}
+        <div class="pick-copy">
+          <div class="side">TRACK ${side.toUpperCase()}</div>
+          <h2 class="title">${esc(song.title)}</h2>
+          <p class="album">${esc(metaLine(song))}</p>
+          <span class="cta">选这首晋级</span>
+        </div>
+      </button>
+      <button type="button" class="preview-btn" data-preview="${side}">试听</button>
+    </div>
+  `;
+}
+
+function renderChamp(state) {
+  const c = state.bracket.champion;
+  const avatar = state.artistAvatar || "";
+  const { runnerUp, semis } = podiumFromBracket(state.bracket);
+
+  app.innerHTML = shell(
+    `
+    <section class="champ champ-cup">
+      <div class="champ-cup-stage">
+        <p class="champ-cup-artist"><span class="rapper-name">${esc(state.artistName)}</span></p>
+        <p class="champ-cup-born">冠军诞生</p>
+        <p class="champ-cup-brand">真黑怕巅峰对决</p>
+        <p class="champ-cup-champion-word">C H A M P I O N</p>
+        <div class="champ-cup-cover-wrap">
+          ${imgTag(coverUrl(c, avatar), { alt: c.title, className: "champ-cup-cover" })}
+        </div>
+        <h1 class="champ-cup-title">${esc(c.title)}</h1>
+        <p class="champ-cup-meta">${esc(metaLine(c))}</p>
+      </div>
+
+      <div class="podium-row">
+        ${podiumCard("亚军", "RUNNER-UP", runnerUp, avatar)}
+        ${podiumCard("四强", "SEMI", semis[0], avatar)}
+        ${podiumCard("四强", "SEMI", semis[1], avatar)}
+      </div>
+
+      <div id="player-mount" class="player-mount champ-player"></div>
+
+      <div class="champ-cup-actions">
+        <button type="button" class="primary-btn share-bracket-btn" id="share-bracket-btn">分享我的对阵图</button>
+        <div class="champ-cup-secondary">
+          <button type="button" class="ghost-btn" id="again-same">再来一场</button>
+          <button type="button" class="ghost-btn" id="again-home">换个歌手</button>
+        </div>
+      </div>
+    </section>
+  `,
+    {
+      back: "/",
+      actions: `<a class="ghost-btn rank-link" href="#/rank">排行榜</a>`,
+    }
+  );
+  bindBack();
+
+  const player = createPlayer(document.getElementById("player-mount"));
+  player.load(c, { autoplay: false });
+  document.getElementById("cup-player").hidden = false;
+
+  // still report wins silently
+  reportChampionWin({
+    song: c,
+    artistId: state.neteaseArtistId,
+    artistName: state.artistName,
+    artistAvatar: avatar,
+  }).catch(() => {});
+
+  document.getElementById("share-bracket-btn").addEventListener("click", () => openShareBracket(state));
+  document.getElementById("again-same").addEventListener("click", () => {
+    clearState();
+    navigate(`/artist/${state.artistId}`);
+  });
+  document.getElementById("again-home").addEventListener("click", () => {
+    clearState();
+    navigate("/");
+  });
+}
+
+async function renderRank(tab = "songs") {
+  app.innerHTML = shell(
+    `<section class="rank-page"><p class="loading-line">加载排行榜…</p></section>`,
+    { back: "/" }
+  );
+  bindBack();
+
+  const paint = async (active, q = "") => {
+    app.innerHTML = shell(
+      `
+      <section class="rank-page">
+        <div class="rank-head">
+          <h1>排行榜</h1>
+          <p class="rank-sub" id="rank-sub"></p>
+        </div>
+        <div class="rank-tabs">
+          <button type="button" class="mode-chip ${active === "songs" ? "active" : ""}" data-rank-tab="songs">歌曲</button>
+          <button type="button" class="mode-chip ${active === "artists" ? "active" : ""}" data-rank-tab="artists">歌手</button>
+        </div>
+        <div class="search-row">
+          <input id="rank-search" type="search" placeholder="${
+            active === "songs" ? "搜索前 150 歌曲…" : "搜索歌手…"
+          }" value="${esc(q)}" autocomplete="off" />
+        </div>
+        <div id="rank-list" class="rank-list"><p class="loading-line">加载中…</p></div>
+        <div id="player-mount" class="player-mount"></div>
+      </section>
+    `,
+      { back: "/" }
+    );
+    bindBack();
+
+    const player = createPlayer(document.getElementById("player-mount"));
+    let timer = null;
+    const input = document.getElementById("rank-search");
+
+    const loadList = async (query) => {
+      const box = document.getElementById("rank-list");
+      if (!box) return;
+      box.innerHTML = `<p class="loading-line">加载中…</p>`;
+      try {
+        const data =
+          active === "songs"
+            ? await fetchSongRank({ limit: 150, q: query })
+            : await fetchArtistRank({ limit: 100, q: query });
+        const sub = document.getElementById("rank-sub");
+        if (sub && data.updatedAt) {
+          sub.textContent = String(data.updatedAt).slice(0, 10);
+        }
+        const items = data.items || [];
+        if (!items.length) {
+          box.innerHTML = `<p class="loading-line">暂无数据</p>`;
+          return;
+        }
+        box.innerHTML = items
+          .map((item, i) => {
+            const rank = i + 1;
+            const rankClass = rank <= 3 ? `top${rank}` : "";
+            if (active === "songs") {
+              return `
+                <article class="rank-row">
+                  <div class="rank-num ${rankClass}">${rank}</div>
+                  ${imgTag(item.cover, { alt: item.title, className: "rank-cover" })}
+                  <div class="rank-meta">
+                    <div class="rank-title">${esc(item.title)}</div>
+                    <div class="rank-desc">${esc(item.artist)} · 单曲夺冠 ${Number(item.wins || 0).toLocaleString("zh-CN")} 次</div>
+                  </div>
+                  <button type="button" class="rank-play" data-song-id="${esc(item.songId)}" data-title="${esc(item.title)}" data-artist="${esc(item.artist)}" data-cover="${esc(item.cover || "")}" aria-label="试听">▶</button>
+                </article>`;
+            }
+            return `
+              <article class="rank-row">
+                <div class="rank-num ${rankClass}">${rank}</div>
+                ${imgTag(item.avatar || item.cover, { alt: item.name, className: "rank-cover round" })}
+                <div class="rank-meta">
+                  <div class="rank-title">${esc(item.name)}</div>
+                  <div class="rank-desc">单曲夺冠 ${Number(item.wins || 0).toLocaleString("zh-CN")} 次</div>
+                </div>
+              </article>`;
+          })
+          .join("");
+
+        box.querySelectorAll("[data-song-id]").forEach((btn) => {
+          btn.addEventListener("click", () => {
+            player.load(
+              {
+                title: btn.dataset.title,
+                artist: btn.dataset.artist,
+                cover: btn.dataset.cover,
+                neteaseId: btn.dataset.songId,
+              },
+              { autoplay: true }
+            );
+          });
+        });
+      } catch (e) {
+        box.innerHTML = `<p class="loading-line">排行榜加载失败</p>`;
+      }
+    };
+
+    document.querySelectorAll("[data-rank-tab]").forEach((chip) => {
+      chip.addEventListener("click", () => {
+        const next = chip.dataset.rankTab;
+        navigate(next === "artists" ? "/rank/artists" : "/rank");
+      });
+    });
+
+    input.addEventListener("input", () => {
+      clearTimeout(timer);
+      timer = setTimeout(() => loadList(input.value.trim()), 220);
+    });
+
+    await loadList(q);
+  };
+
+  await paint(tab);
+}
+
+function metaLine(song) {
+  if (!song) return "";
+  const album = song.album || song.collection || "";
+  let year = song.year || "";
+  if (!year && song.publishTime) {
+    const y = new Date(Number(song.publishTime)).getFullYear();
+    if (y && !Number.isNaN(y)) year = String(y);
+  }
+  return [album, year].filter(Boolean).join(" · ") || album || "单曲";
+}
+
+function uniquePath(path, champion) {
+  const seen = new Set();
+  const out = [];
+  for (const s of path) {
+    if (!s?.title || seen.has(s.id || s.title)) continue;
+    seen.add(s.id || s.title);
+    out.push(s);
+  }
+  if (champion && !seen.has(champion.id || champion.title)) out.push(champion);
+  return out;
+}
+
+function esc(s) {
+  return String(s ?? "")
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;");
+}

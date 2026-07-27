@@ -1,0 +1,17 @@
+{
+  "name": "cn-rap-cup",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "rank:dev": "node scripts/rank-local.mjs",
+    "build": "vite build",
+    "preview": "vite preview",
+    "enrich": "node scripts/enrich-artwork.mjs",
+    "roster": "node scripts/build-roster.mjs && node scripts/rebuild-from-cache.mjs"
+  },
+  "devDependencies": {
+    "vite": "^6.3.5"
+  }
+}

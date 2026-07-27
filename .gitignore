@@ -1,0 +1,13 @@
+# Dependencies
+node_modules/
+
+# Build
+dist/
+
+# Local
+.DS_Store
+*.log
+.env
+.env.*
+data/rank-store.json
+worker/.wrangler/

@@ -1,0 +1,14 @@
+name = "cn-rap-cup-rank"
+main = "src/index.js"
+compatibility_date = "2024-11-01"
+
+# Create D1 first:
+#   npx wrangler d1 create cn-rap-cup-rank
+# then paste database_id below.
+[[d1_databases]]
+binding = "DB"
+database_name = "cn-rap-cup-rank"
+database_id = "REPLACE_WITH_YOUR_D1_ID"
+
+# After Pages deploy, attach a route e.g. rap.heipaclub.com/api/rank/*
+# or call this worker subdomain from the frontend.
