@@ -998,6 +998,11 @@ a.ghost-btn {
   display: flex;
   gap: 0.5rem;
   margin: 1.25rem 0 0.85rem;
+  flex-wrap: wrap;
+}
+
+.rank-region-row {
+  margin: 0 0 0.65rem;
 }
 
 .rank-list {

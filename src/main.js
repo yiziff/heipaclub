@@ -55,6 +55,11 @@ import {
   reportChampionWin,
 } from "./rank-api.js";
 import {
+  buildLabelRank,
+  filterLabelRank,
+  filterRankItemsByRegion,
+} from "./rank-filter.js";
+import {
   buildBracket,
   buildField,
   chooseWinner,
@@ -124,7 +129,9 @@ function render() {
   const saved = loadState();
 
   if (parts[0] === "rank") {
-    renderRank(parts[1] === "artists" ? "artists" : "songs");
+    const tab =
+      parts[1] === "artists" ? "artists" : parts[1] === "labels" ? "labels" : "songs";
+    renderRank(tab);
     return;
   }
   if (parts[0] === "bracket" && saved?.bracket && !saved.bracket.champion) {
@@ -2708,13 +2715,18 @@ function renderChamp(state) {
 }
 
 async function renderRank(tab = "songs") {
+  let region = "cn"; // 中文 | 欧美
   app.innerHTML = shell(
     `<section class="rank-page"><p class="loading-line">加载排行榜…</p></section>`,
     { back: "/" }
   );
   bindBack();
 
+  const tabHref = (t) =>
+    t === "artists" ? "/rank/artists" : t === "labels" ? "/rank/labels" : "/rank";
+
   const paint = async (active, q = "") => {
+    const showRegion = active === "songs" || active === "artists";
     app.innerHTML = shell(
       `
       <section class="rank-page">
@@ -2722,13 +2734,26 @@ async function renderRank(tab = "songs") {
           <h1>排行榜</h1>
           <p class="rank-sub" id="rank-sub"></p>
         </div>
-        <div class="rank-tabs">
+        <div class="rank-tabs" role="tablist" aria-label="排行榜类型">
           <button type="button" class="mode-chip ${active === "songs" ? "active" : ""}" data-rank-tab="songs">歌曲</button>
           <button type="button" class="mode-chip ${active === "artists" ? "active" : ""}" data-rank-tab="artists">歌手</button>
+          <button type="button" class="mode-chip ${active === "labels" ? "active" : ""}" data-rank-tab="labels">厂牌</button>
         </div>
+        ${
+          showRegion
+            ? `<div class="filter-row sort-row rank-region-row" id="rank-region-row" role="group" aria-label="地区榜">
+          <button type="button" class="mode-chip ${region === "cn" ? "active" : ""}" data-rank-region="cn">中文</button>
+          <button type="button" class="mode-chip ${region === "west" ? "active" : ""}" data-rank-region="west">欧美</button>
+        </div>`
+            : ""
+        }
         <div class="search-row">
           <input id="rank-search" type="search" placeholder="${
-            active === "songs" ? "搜索前 150 歌曲…" : "搜索歌手…"
+            active === "songs"
+              ? "搜索歌曲…"
+              : active === "artists"
+                ? "搜索歌手…"
+                : "搜索厂牌…"
           }" value="${esc(q)}" autocomplete="off" />
         </div>
         <div id="rank-list" class="rank-list"><p class="loading-line">加载中…</p></div>
@@ -2748,19 +2773,38 @@ async function renderRank(tab = "songs") {
       if (!box) return;
       box.innerHTML = `<p class="loading-line">加载中…</p>`;
       try {
-        const data =
-          active === "songs"
-            ? await fetchSongRank({ limit: 150, q: query })
-            : await fetchArtistRank({ limit: 100, q: query });
-        const sub = document.getElementById("rank-sub");
-        if (sub && data.updatedAt) {
-          sub.textContent = String(data.updatedAt).slice(0, 10);
+        let items = [];
+        let updatedAt = null;
+        if (active === "labels") {
+          const data = await fetchArtistRank({ limit: 200, q: "" });
+          updatedAt = data.updatedAt;
+          items = filterLabelRank(buildLabelRank(data.items || []), query);
+        } else if (active === "songs") {
+          const data = await fetchSongRank({ limit: 200, q: query });
+          updatedAt = data.updatedAt;
+          items = filterRankItemsByRegion(data.items || [], region, "songs");
+        } else {
+          const data = await fetchArtistRank({ limit: 200, q: query });
+          updatedAt = data.updatedAt;
+          items = filterRankItemsByRegion(data.items || [], region, "artists");
         }
-        const items = data.items || [];
+
+        const sub = document.getElementById("rank-sub");
+        if (sub) {
+          const board =
+            active === "labels"
+              ? "厂牌榜"
+              : `${region === "west" ? "欧美" : "中文"}${active === "songs" ? "单曲" : "歌手"}榜`;
+          sub.textContent = updatedAt
+            ? `${board} · ${String(updatedAt).slice(0, 10)}`
+            : board;
+        }
+
         if (!items.length) {
           box.innerHTML = `<p class="loading-line">暂无数据</p>`;
           return;
         }
+
         box.innerHTML = items
           .map((item, i) => {
             const rank = i + 1;
@@ -2775,6 +2819,17 @@ async function renderRank(tab = "songs") {
                     <div class="rank-desc">${esc(item.artist)} · 单曲夺冠 ${Number(item.wins || 0).toLocaleString("zh-CN")} 次</div>
                   </div>
                   <button type="button" class="rank-play" data-song-id="${esc(item.songId)}" data-title="${esc(item.title)}" data-artist="${esc(item.artist)}" data-cover="${esc(item.cover || "")}" aria-label="试听">▶</button>
+                </article>`;
+            }
+            if (active === "labels") {
+              return `
+                <article class="rank-row">
+                  <div class="rank-num ${rankClass}">${rank}</div>
+                  ${imgTag(item.avatar, { alt: item.name, className: "rank-cover round" })}
+                  <div class="rank-meta">
+                    <div class="rank-title">${esc(item.name)}</div>
+                    <div class="rank-desc">${esc(item.city || "厂牌")} · ${item.members} 人 · 成员夺冠累计 ${Number(item.wins || 0).toLocaleString("zh-CN")} 次</div>
+                  </div>
                 </article>`;
             }
             return `
@@ -2810,11 +2865,20 @@ async function renderRank(tab = "songs") {
     document.querySelectorAll("[data-rank-tab]").forEach((chip) => {
       chip.addEventListener("click", () => {
         const next = chip.dataset.rankTab;
-        navigate(next === "artists" ? "/rank/artists" : "/rank");
+        navigate(tabHref(next));
       });
     });
 
-    input.addEventListener("input", () => {
+    document.querySelectorAll("[data-rank-region]").forEach((chip) => {
+      chip.addEventListener("click", () => {
+        const next = chip.dataset.rankRegion === "west" ? "west" : "cn";
+        if (next === region) return;
+        region = next;
+        paint(active, input?.value?.trim() || "");
+      });
+    });
+
+    input?.addEventListener("input", () => {
       clearTimeout(timer);
       timer = setTimeout(() => loadList(input.value.trim()), 220);
     });
