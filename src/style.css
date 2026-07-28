@@ -218,6 +218,42 @@ a.ghost-btn {
   background: radial-gradient(circle at center, rgba(17, 17, 16, 0.18), transparent 55%);
 }
 
+.countdown-overlay.is-ready {
+  pointer-events: none;
+  background: transparent;
+  transition: opacity 0.28s ease;
+}
+
+.countdown-overlay.is-ready.is-out {
+  opacity: 0;
+}
+
+.bracket-ready-hint {
+  margin: 0;
+  font-family: var(--display);
+  font-size: clamp(2.7rem, 10.8vw, 4.6rem);
+  letter-spacing: 0.12em;
+  line-height: 1;
+  text-align: center;
+  color: rgba(184, 255, 26, 0.72);
+  text-shadow:
+    0 0 18px rgba(184, 255, 26, 0.28),
+    0 2px 10px rgba(17, 17, 16, 0.12);
+  animation: bracket-ready-fade 1.6s ease-in-out infinite;
+  pointer-events: none;
+  user-select: none;
+}
+
+@keyframes bracket-ready-fade {
+  0%,
+  100% {
+    opacity: 0.45;
+  }
+  50% {
+    opacity: 0.85;
+  }
+}
+
 .countdown-num {
   font-family: var(--display);
   font-size: clamp(7.5rem, 28vw, 14rem);
@@ -941,6 +977,10 @@ a.ghost-btn {
   .shell:has(.hero) .topbar-actions .hangla-top-btn,
   .shell:has(.hero) .topbar-actions .beef-top-btn {
     animation: none;
+  }
+  .bracket-ready-hint {
+    animation: none;
+    opacity: 0.7;
   }
 }
 
@@ -1861,12 +1901,68 @@ body:has(.match-screen) {
     min-height: 0;
   }
   .bracket-board.is-split {
-    grid-template-columns: minmax(0, 1fr) 4.75rem minmax(0, 1fr);
-    gap: 0.2rem;
+    grid-template-columns: minmax(0, 1fr) 4.2rem minmax(0, 1fr);
+    gap: 0.15rem;
   }
   .bracket-board.is-split.has-champ-path {
-    grid-template-columns: minmax(0, 1fr) 6.25rem minmax(0, 1fr);
-    gap: 0.25rem;
+    grid-template-columns: minmax(0, 1fr) 5.5rem minmax(0, 1fr);
+    gap: 0.2rem;
+  }
+  .bracket-wing {
+    gap: 0.18rem;
+  }
+  /* 32????????????+???? */
+  .bracket-round[data-round="0"] {
+    width: 6.6rem;
+    min-width: 6.6rem;
+    flex: 1.35 1 0;
+  }
+  .bracket-round[data-round="0"] .bracket-slot {
+    grid-template-columns: 1.15rem 1fr;
+    gap: 0.2rem;
+    min-height: 1.4rem;
+    padding: 0.12rem 0.2rem;
+  }
+  .bracket-round[data-round="0"] .bracket-slot-cover {
+    width: 1.15rem;
+    height: 1.15rem;
+  }
+  .bracket-round[data-round="0"] .bracket-slot-title {
+    font-size: 0.62rem;
+  }
+  .bracket-round[data-round="0"] .bracket-round-label {
+    font-size: 0.62rem;
+  }
+  /* ???????????????? 32? */
+  .bracket-round:not([data-round="0"]) {
+    width: 2.35rem;
+    min-width: 2.35rem;
+    flex: 0 0 auto;
+  }
+  .bracket-round:not([data-round="0"]) .bracket-round-label {
+    font-size: 0.48rem;
+    letter-spacing: 0;
+    margin-bottom: 0.18rem;
+  }
+  .bracket-round:not([data-round="0"]) .bracket-round-matches {
+    gap: 0.2rem;
+  }
+  .bracket-round:not([data-round="0"]) .bracket-slot {
+    grid-template-columns: 1fr;
+    min-height: 0.95rem;
+    padding: 0.08rem 0.1rem;
+    gap: 0;
+  }
+  .bracket-round:not([data-round="0"]) .bracket-slot-cover {
+    display: none;
+  }
+  .bracket-round:not([data-round="0"]) .bracket-slot-title {
+    font-size: 0.42rem;
+  }
+  .bracket-round:not([data-round="0"]) .bracket-slot.is-empty {
+    font-size: 0.42rem;
+    padding: 0.08rem 0.08rem;
+    min-height: 0.95rem;
   }
   .bracket-slot {
     grid-template-columns: 1.05rem 1fr;
@@ -1887,6 +1983,9 @@ body:has(.match-screen) {
   }
   .bracket-round-label {
     font-size: 0.62rem;
+  }
+  .bracket-ready-hint {
+    font-size: clamp(2.1rem, 10.8vw, 3.25rem);
   }
   .bracket-actions {
     margin-top: 0.4rem;

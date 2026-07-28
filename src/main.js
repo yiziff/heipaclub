@@ -1540,30 +1540,11 @@ async function renderSetup(artistId) {
       paint();
     });
 
-    document.getElementById("start-btn").addEventListener("click", async () => {
+    document.getElementById("start-btn").addEventListener("click", () => {
       const btn = document.getElementById("start-btn");
-      const prevLabel = btn.textContent;
       btn.disabled = true;
-      btn.textContent = "准备开赛…";
       const aliases = [artist.search, artist.neteaseArtistName].filter(Boolean);
       try {
-        // First 4 songs ≈ first 2 matches — enough to start; rest match in background
-        const { songs: partial, background } = await enrichSongsPlaySourceProgressive(
-          fieldSongs,
-          artist.name,
-          {
-            concurrency: 6,
-            artistAliases: aliases,
-            readyCount: 4,
-            onSong: (song) => {
-              const s = loadState();
-              if (!s?.bracket) return;
-              s.bracket = patchPlaySourceInBracket(s.bracket, song);
-              saveState(s);
-            },
-          }
-        );
-        fieldSongs = partial;
         const bracket = buildBracket(artist.songs, {
           mode,
           max: FIELD_MAX,
@@ -1575,26 +1556,42 @@ async function renderSetup(artistId) {
           artistAvatar: artist.avatar || "",
           neteaseArtistId: artist.neteaseArtistId || "",
           artistSearch: artist.search || "",
-          playSourceReady: 4,
+          playSourceReady: 0,
           bracket,
         });
+        // 先跳进对阵图，播放源后台补齐
         navigate("/bracket");
-        background
+        enrichSongsPlaySourceProgressive(fieldSongs, artist.name, {
+          concurrency: 6,
+          artistAliases: aliases,
+          readyCount: 4,
+          onSong: (song) => {
+            const st = loadState();
+            if (!st?.bracket) return;
+            st.bracket = patchPlaySourceInBracket(st.bracket, song);
+            saveState(st);
+          },
+        })
+          .then(({ background }) => background)
           .then((all) => {
-            const s = loadState();
-            if (!s?.bracket) return;
+            const st = loadState();
+            if (!st?.bracket || !all?.length) return;
+            let next = st.bracket;
+            for (const song of all) next = patchPlaySourceInBracket(next, song);
             const itunesN = all.filter((x) => x.playSource === "itunes").length;
-            s.playSourceStats = { itunes: itunesN, total: all.length };
-            s.playSourceReady = all.length;
-            saveState(s);
+            saveState({
+              ...st,
+              bracket: next,
+              playSourceStats: { itunes: itunesN, total: all.length },
+              playSourceReady: all.length,
+            });
           })
           .catch(() => {});
       } catch (e) {
         btn.disabled = false;
-        btn.textContent = prevLabel;
-        alert(`准备开赛失败：${e.message || e}`);
+        alert(`开赛失败：${e.message || e}`);
       }
-    });
+    })
   };
 
   paint();
@@ -1972,7 +1969,8 @@ function renderBracketPreview(state) {
   const avatar = state.artistAvatar || "";
   const size = state.bracket.size;
   let cancelled = false;
-  let timer = null;
+  let pollTimer = null;
+  let started = false;
 
   app.innerHTML = shell(
     `
@@ -1984,8 +1982,8 @@ function renderBracketPreview(state) {
         </div>
       </div>
       ${renderBracketHtml(state.bracket, avatar)}
-      <div class="countdown-overlay" id="countdown-overlay" aria-live="polite">
-        <div class="countdown-num" id="countdown-num">3</div>
+      <div class="countdown-overlay is-ready" id="countdown-overlay" aria-live="polite">
+        <p class="bracket-ready-hint" id="bracket-ready-hint">准备开赛！</p>
       </div>
       <div class="setup-actions bracket-actions">
         <button type="button" class="ghost-btn" id="back-setup">返回调整签表</button>
@@ -1998,7 +1996,7 @@ function renderBracketPreview(state) {
 
   const cleanup = () => {
     cancelled = true;
-    if (timer) clearTimeout(timer);
+    if (pollTimer) clearTimeout(pollTimer);
     window.removeEventListener("resize", runFit);
   };
 
@@ -2019,26 +2017,32 @@ function renderBracketPreview(state) {
     navigate(`/artist/${state.artistId}`);
   });
 
-  const steps = ["3", "2", "1", "GO"];
-  let i = 0;
-  const numEl = document.getElementById("countdown-num");
-  const tick = () => {
-    if (cancelled) return;
-    if (i >= steps.length) {
+  const goPlay = () => {
+    if (cancelled || started) return;
+    started = true;
+    const overlay = document.getElementById("countdown-overlay");
+    overlay?.classList.add("is-out");
+    setTimeout(() => {
+      if (cancelled) return;
       cleanup();
       navigate("/play");
+    }, 320);
+  };
+
+  const began = Date.now();
+  const tickReady = () => {
+    if (cancelled || started) return;
+    const latest = loadState() || state;
+    const ready = Number(latest.playSourceReady || 0);
+    const waited = Date.now() - began;
+    // 有至少 4 首播放源，或最多等约 2.8s，避免卡死
+    if (ready >= 4 || waited >= 2800) {
+      goPlay();
       return;
     }
-    if (numEl) {
-      numEl.textContent = steps[i];
-      numEl.classList.remove("pop");
-      void numEl.offsetWidth;
-      numEl.classList.add("pop");
-    }
-    i += 1;
-    timer = setTimeout(tick, i === steps.length ? 480 : 820);
+    pollTimer = setTimeout(tickReady, 180);
   };
-  timer = setTimeout(tick, 350);
+  pollTimer = setTimeout(tickReady, 400);
 }
 
 function renderMatch(state) {
