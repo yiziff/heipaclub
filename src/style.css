@@ -358,7 +358,7 @@ a.ghost-btn {
 }
 
 .champ-path-wrap::after {
-  content: "♛";
+  content: "?";
   position: absolute;
   top: -0.55rem;
   right: -0.35rem;
@@ -489,7 +489,7 @@ a.ghost-btn {
 
 .champ-hero-crown::before,
 .champ-hero-crown::after {
-  content: "✦";
+  content: "?";
   position: absolute;
   color: #fff6c2;
   font-size: 0.55rem;
@@ -531,12 +531,16 @@ a.ghost-btn {
 .champ-hero-title {
   position: relative;
   z-index: 2;
-  margin-top: 0.45rem;
+  margin: 0.45rem auto 0;
   font-family: var(--display);
   font-size: 1.35rem;
   letter-spacing: 0.04em;
-  line-height: 1;
-  max-width: 12rem;
+  line-height: 1.15;
+  width: 100%;
+  max-width: 14rem;
+  text-align: center;
+  color: #c9a227;
+  text-shadow: 0 1px 0 rgba(255, 248, 220, 0.65);
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
@@ -545,10 +549,13 @@ a.ghost-btn {
 .champ-hero-meta {
   position: relative;
   z-index: 2;
-  margin-top: 0.25rem;
-  color: var(--muted);
+  margin: 0.25rem auto 0;
+  width: 100%;
+  max-width: 14rem;
+  text-align: center;
+  color: #a67c00;
   font-size: 0.72rem;
-  max-width: 12rem;
+  font-weight: 600;
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
@@ -634,7 +641,7 @@ a.ghost-btn {
   opacity: 0.72;
   z-index: 0;
   pointer-events: none;
-  /* Wide soft falloff into page bg — no box edge */
+  /* Wide soft falloff into page bg ? no box edge */
   -webkit-mask-image: radial-gradient(
     ellipse 55% 58% at 50% 42%,
     #000 0%,
@@ -655,7 +662,7 @@ a.ghost-btn {
   );
 }
 
-/* Very light wash so photo tones match page cream — also masked soft */
+/* Very light wash so photo tones match page cream ? also masked soft */
 .bracket-board.has-center-bg::after {
   content: "";
   position: absolute;
@@ -860,6 +867,90 @@ a.ghost-btn {
   transform: translateY(-1px);
 }
 
+.shell:has(.hero) .topbar-actions .hangla-top-btn {
+  position: relative;
+  border: none;
+  background: var(--ink);
+  color: #fff;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  padding: 0.5rem 1.05rem;
+  white-space: nowrap;
+  box-shadow:
+    0 0 0 3px rgba(17, 17, 16, 0.18),
+    0 6px 16px rgba(17, 17, 16, 0.22);
+  animation: hangla-btn-pulse 2s ease-in-out infinite;
+}
+
+.shell:has(.hero) .topbar-actions .hangla-top-btn:hover {
+  background: #000;
+  transform: translateY(-1px);
+  filter: brightness(1.08);
+}
+
+.shell:has(.hero) .topbar-actions .beef-top-btn {
+  position: relative;
+  border: none;
+  background: #ff2d55;
+  color: #fff;
+  font-weight: 800;
+  letter-spacing: 0.04em;
+  padding: 0.5rem 1.05rem;
+  white-space: nowrap;
+  box-shadow:
+    0 0 0 3px rgba(255, 45, 85, 0.22),
+    0 6px 16px rgba(255, 45, 85, 0.35);
+  animation: beef-btn-pulse 2s ease-in-out infinite;
+}
+
+.shell:has(.hero) .topbar-actions .beef-top-btn:hover {
+  background: #ff1744;
+  transform: translateY(-1px);
+  filter: brightness(1.06);
+}
+
+@keyframes beef-btn-pulse {
+  0%,
+  100% {
+    box-shadow:
+      0 0 0 3px rgba(255, 45, 85, 0.2),
+      0 6px 16px rgba(255, 45, 85, 0.32);
+  }
+  50% {
+    box-shadow:
+      0 0 0 5px rgba(255, 45, 85, 0.1),
+      0 8px 18px rgba(255, 45, 85, 0.42);
+  }
+}
+
+@keyframes hangla-btn-pulse {
+  0%,
+  100% {
+    box-shadow:
+      0 0 0 3px rgba(17, 17, 16, 0.16),
+      0 6px 16px rgba(17, 17, 16, 0.2);
+  }
+  50% {
+    box-shadow:
+      0 0 0 5px rgba(17, 17, 16, 0.08),
+      0 8px 18px rgba(17, 17, 16, 0.28);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .shell:has(.hero) .topbar-actions .hangla-top-btn,
+  .shell:has(.hero) .topbar-actions .beef-top-btn {
+    animation: none;
+  }
+}
+
+@media (max-width: 640px) {
+  .shell:has(.hero) .topbar-actions .hangla-top-btn {
+    padding: 0.45rem 0.75rem;
+    font-size: 0.82rem;
+  }
+}
+
 @keyframes rank-btn-pulse {
   0%,
   100% {
@@ -1044,7 +1135,7 @@ a.ghost-btn {
   background: rgba(17, 17, 16, 0.05);
 }
 
-/* —— Home —— */
+/* ?? Home ?? */
 .hero {
   min-height: 0;
   display: grid;
@@ -1147,12 +1238,23 @@ a.ghost-btn {
   }
 }
 
-.hero p {
+.hero p,
+.hero-tagline {
   margin: 0;
-  max-width: 28rem;
-  font-size: 1.05rem;
+  max-width: 36rem;
+  font-size: clamp(0.95rem, 2.4vw, 1.08rem);
   line-height: 1.55;
   color: var(--muted);
+  letter-spacing: 0.02em;
+}
+
+.hero-tagline span {
+  display: inline-block;
+  margin-top: 0.2rem;
+  color: var(--ink);
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  opacity: 0.82;
 }
 
 .hero-actions {
@@ -1432,7 +1534,7 @@ a.ghost-btn {
   line-height: 1.45;
 }
 
-/* —— Setup —— */
+/* ?? Setup ?? */
 .setup {
   animation: rise 0.45s ease both;
 }
@@ -1543,7 +1645,7 @@ a.ghost-btn {
   padding: 0;
 }
 
-/* —— Match —— */
+/* ?? Match ?? */
 body:has(.match-screen) {
   overflow: hidden;
 }
@@ -1608,7 +1710,7 @@ body:has(.match-screen) {
   margin-top: 0.15rem;
 }
 
-/* 试听键约落在视口 80% 高度：vs 区高度 = 80vh − 顶栏与 meta */
+/* ???????? 80% ???vs ??? = 80vh ? ??? meta */
 .vs-grid {
   display: grid;
   grid-template-columns: 1fr auto 1fr;
@@ -1900,7 +2002,7 @@ body:has(.match-screen) {
   align-self: center;
 }
 
-/* —— Champion (Music Cup style) —— */
+/* ?? Champion (Music Cup style) ?? */
 body:has(.champ-cup) {
   overflow: hidden;
 }
@@ -2175,7 +2277,7 @@ body:has(.champ-cup) {
   text-decoration: none;
 }
 
-/* —— Round splash (Music Cup style) —— */
+/* ?? Round splash (Music Cup style) ?? */
 .round-splash {
   position: fixed;
   inset: 0;
@@ -2262,7 +2364,7 @@ body:has(.champ-cup) {
   }
 }
 
-/* —— Share filled bracket —— */
+/* ?? Share filled bracket ?? */
 .share-bracket {
   position: fixed;
   inset: 0;
@@ -2296,11 +2398,16 @@ body:has(.champ-cup) {
 }
 
 .share-bracket-head {
-  display: flex;
-  align-items: flex-start;
-  justify-content: space-between;
-  gap: 1rem;
-  flex-wrap: wrap;
+  position: relative;
+  display: block;
+  padding-right: 0;
+  min-height: 2.8rem;
+}
+
+.share-bracket-head > div:first-child {
+  width: 100%;
+  text-align: center;
+  padding: 0 8.5rem 0.15rem;
 }
 
 .share-bracket-kicker {
@@ -2315,18 +2422,31 @@ body:has(.champ-cup) {
   font-family: var(--display);
   font-size: clamp(1.3rem, 3vw, 2rem);
   letter-spacing: 0.03em;
-  line-height: 1;
+  line-height: 1.15;
+  text-align: center;
 }
 
 .share-bracket-champ-line {
   margin: 0.35rem 0 0;
   font-weight: 700;
+  color: var(--muted);
+  text-align: center;
+}
+
+.share-bracket-champ-song {
+  color: #c9a227;
+  font-weight: 800;
+  text-shadow: 0 1px 0 rgba(255, 248, 220, 0.55);
 }
 
 .share-bracket-actions {
+  position: absolute;
+  top: 0;
+  right: 0;
   display: flex;
   gap: 0.5rem;
   flex-wrap: wrap;
+  z-index: 2;
 }
 
 .share-bracket-stage {
@@ -2378,25 +2498,63 @@ body:has(.champ-cup) {
 .share-bracket-qr-copy {
   display: flex;
   flex-direction: column;
-  gap: 0.2rem;
+  gap: 0.35rem;
   min-width: 0;
+  justify-content: center;
 }
 
-.share-bracket-qr-copy strong {
-  font-size: 1.05rem;
-  letter-spacing: 0.04em;
+.share-bracket-site {
+  display: flex;
+  align-items: center;
+  gap: 0.45rem;
+  flex-wrap: wrap;
 }
 
-.share-bracket-qr-copy span {
+.share-site-name {
   font-family: var(--display);
-  font-size: 1.15rem;
-  letter-spacing: 0.06em;
+  font-size: clamp(1.25rem, 2.6vw, 1.65rem);
+  font-style: italic;
+  font-weight: 800;
+  letter-spacing: 0.04em;
+  line-height: 1;
 }
 
-.share-bracket-qr-copy em {
+.share-site-heipa {
+  color: #111110;
+}
+
+.share-site-club {
+  background: linear-gradient(90deg, #5a7a12, #7a9a1e 55%, #8aab28);
+  -webkit-background-clip: text;
+  background-clip: text;
+  color: transparent;
+}
+
+.share-site-tld {
+  color: #111110;
+  font-weight: 700;
+}
+
+.share-site-z {
+  display: inline-flex;
+  align-items: flex-end;
+  font-family: var(--display);
+  font-size: 0.72rem;
+  font-weight: 700;
+  font-style: italic;
+  letter-spacing: 0;
+  line-height: 1;
+  color: #5a6e22;
+  margin-left: 0.05rem;
+  transform: translateY(-0.15em);
+}
+
+.share-bracket-slogan {
   font-style: normal;
-  font-size: 0.82rem;
-  color: var(--muted);
+  font-size: 0.86rem;
+  line-height: 1.45;
+  color: #5c5a55;
+  max-width: 22rem;
 }
 
 .share-bracket-tip {
@@ -2596,7 +2754,7 @@ body:has(.champ-cup) {
   }
 }
 
-/* —— 从夯到拉 —— */
+/* ?? ???? ?? */
 .hangla-screen {
   animation: rise 0.4s ease both;
   display: flex;
@@ -3004,4 +3162,178 @@ body:has(.champ-cup) {
   .hangla-result-row {
     grid-template-columns: 1fr;
   }
+}
+
+/* ???? ????????? ???? */
+.beef-screen {
+  display: flex;
+  flex-direction: column;
+  gap: 0.85rem;
+}
+
+.beef-head h1 {
+  margin: 0;
+  font-family: var(--display);
+  font-size: clamp(1.8rem, 4vw, 2.4rem);
+  letter-spacing: 0.04em;
+}
+
+.beef-head p {
+  margin: 0.35rem 0 0;
+  color: var(--muted);
+  line-height: 1.5;
+}
+
+.beef-section-label {
+  font-size: 0.82rem;
+  color: var(--muted);
+  letter-spacing: 0.08em;
+  margin-bottom: 0.45rem;
+}
+
+.beef-vs-mark {
+  text-align: center;
+  font-family: var(--display);
+  font-size: 1.6rem;
+  letter-spacing: 0.12em;
+  opacity: 0.55;
+}
+
+.beef-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.65rem;
+  margin-top: 0.35rem;
+}
+
+.beef-group-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(220px, 1fr));
+  gap: 0.75rem;
+}
+
+.beef-song-card {
+  display: flex;
+  align-items: center;
+  gap: 0.75rem;
+  text-align: left;
+  border: 1px solid var(--line);
+  background: var(--card);
+  padding: 0.65rem 0.75rem;
+  border-radius: 12px;
+  transition: border-color 0.15s ease, transform 0.15s ease, box-shadow 0.15s ease;
+}
+
+.beef-song-card:hover {
+  transform: translateY(-1px);
+  border-color: rgba(17, 17, 16, 0.35);
+}
+
+.beef-song-card.is-selected {
+  border-color: transparent;
+  background: var(--accent);
+  box-shadow: 3px 3px 0 var(--ink);
+}
+
+.beef-song-card.is-dim {
+  opacity: 0.45;
+}
+
+.beef-pick-grid {
+  display: flex;
+  flex-direction: column;
+  gap: 0.35rem;
+}
+
+.beef-song-cover {
+  width: 56px;
+  height: 56px;
+  object-fit: cover;
+  border-radius: 8px;
+  flex: none;
+}
+
+.beef-song-meta {
+  display: flex;
+  flex-direction: column;
+  gap: 0.15rem;
+  min-width: 0;
+}
+
+.beef-song-meta strong {
+  font-size: 0.98rem;
+  line-height: 1.25;
+}
+
+.beef-song-meta span,
+.beef-song-meta em {
+  font-style: normal;
+  font-size: 0.78rem;
+  color: var(--muted);
+}
+
+.beef-song-card.is-selected .beef-song-meta span,
+.beef-song-card.is-selected .beef-song-meta em {
+  color: rgba(17, 17, 16, 0.7);
+}
+
+.beef-scorebar {
+  margin: 0.15rem 0 0.35rem;
+}
+
+.beef-scorebar-names {
+  display: flex;
+  justify-content: space-between;
+  font-size: 0.88rem;
+  font-weight: 700;
+  margin-bottom: 0.35rem;
+}
+
+.beef-scorebar-track {
+  display: flex;
+  height: 10px;
+  border-radius: 999px;
+  overflow: hidden;
+  background: rgba(17, 17, 16, 0.08);
+  border: 1px solid var(--line);
+}
+
+.beef-scorebar-track i {
+  display: block;
+  background: var(--ink);
+  transition: width 0.35s ease;
+}
+
+.beef-scorebar-track b {
+  display: block;
+  background: var(--accent);
+  transition: width 0.35s ease;
+}
+
+.beef-match-brand {
+  width: 40px;
+  height: 40px;
+  border-radius: 50%;
+  display: grid;
+  place-items: center;
+  background: var(--accent);
+  font-size: 1.1rem;
+  flex: none;
+}
+
+.pick-label-badge {
+  display: inline-block;
+  margin-left: 0.45rem;
+  padding: 0.1rem 0.4rem;
+  border-radius: 999px;
+  background: var(--accent);
+  color: var(--ink);
+  font-size: 0.7rem;
+  font-weight: 800;
+  letter-spacing: 0.04em;
+  vertical-align: middle;
+}
+
+.beef-toast {
+  min-height: 1.2rem;
 }

@@ -28,6 +28,10 @@ export function pickSongs(songs, mode = "battle") {
     previewUrl: s.previewUrl || "",
     itunesTrackId: s.itunesTrackId || "",
     trackViewUrl: s.trackViewUrl || "",
+    labelId: s.labelId || null,
+    labelName: s.labelName || "",
+    rosterArtistId: s.rosterArtistId || "",
+    rosterArtistName: s.rosterArtistName || "",
   }));
   // battle / random: keep hot ranking for the field, shuffle for pairing
   if (mode === "battle" || mode === "random") {

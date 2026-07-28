@@ -55,6 +55,18 @@ export function createPlayer(root) {
 
   let current = null;
   let seeking = false;
+  /** Bump to cancel in-flight load()/play() after stop or newer load. */
+  let loadSeq = 0;
+
+  function hardStopAudio() {
+    audio.pause();
+    audio.removeAttribute("src");
+    try {
+      audio.load();
+    } catch {
+      /* ignore */
+    }
+  }
 
   function setPlayingUi(on) {
     card.classList.toggle("is-playing", on);
@@ -105,17 +117,17 @@ export function createPlayer(root) {
   }
 
   async function load(song, { autoplay = true, artistName = "", artistAliases = [] } = {}) {
+    const seq = ++loadSeq;
     current = song;
     card.hidden = false;
     paintMeta(song);
     hint.textContent = "拉取播放地址中…";
     setPlayingUi(false);
-    audio.pause();
-    audio.removeAttribute("src");
-    audio.load();
+    hardStopAudio();
 
     let working = song;
     let { url, via } = await resolveUrl(working);
+    if (seq !== loadSeq) return;
 
     // NetEase often returns null (no cookie / no right) — retry iTunes match
     if (!url) {
@@ -124,13 +136,17 @@ export function createPlayer(root) {
           artistAliases,
           bypassCache: working.playSource === "netease",
         });
+        if (seq !== loadSeq) return;
         current = working;
         paintMeta(working);
         ({ url, via } = await resolveUrl(working));
+        if (seq !== loadSeq) return;
       } catch {
         /* keep failed */
       }
     }
+
+    if (seq !== loadSeq) return;
 
     if (!url) {
       if (!working?.neteaseId && !working?.previewUrl) {
@@ -155,11 +171,18 @@ export function createPlayer(root) {
     audio.src = url;
     if (autoplay) {
       try {
+        if (seq !== loadSeq) return;
         await audio.play();
+        if (seq !== loadSeq) {
+          hardStopAudio();
+          setPlayingUi(false);
+          return;
+        }
         setPlayingUi(true);
         if (via === "itunes") hint.textContent = "Apple 官方试听（约 30 秒）";
         else hint.textContent = "";
       } catch {
+        if (seq !== loadSeq) return;
         hint.textContent = "浏览器拦截了自动播放，点「播放」即可。";
         setPlayingUi(false);
       }
@@ -213,8 +236,23 @@ export function createPlayer(root) {
     el: card,
     load,
     stop() {
-      audio.pause();
+      loadSeq += 1;
+      hardStopAudio();
       setPlayingUi(false);
+      hint.textContent = "";
     },
   };
+}
+
+/** Pause/clear every <audio> on the page (orphaned nodes after route swaps). */
+export function stopAllPageAudio() {
+  document.querySelectorAll("audio").forEach((a) => {
+    try {
+      a.pause();
+      a.removeAttribute("src");
+      a.load();
+    } catch {
+      /* ignore */
+    }
+  });
 }
