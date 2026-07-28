@@ -73,6 +73,17 @@ export async function reportChampionWin({
     return { ok: false, error: data.error || `HTTP ${res.status}` };
   }
 
+  if (data.counted === false) {
+    return {
+      ok: true,
+      skipped: true,
+      reason: data.reason || "daily_quota_exceeded",
+      dailyLimit: data.dailyLimit ?? 5,
+      usedToday: data.usedToday ?? null,
+      remainingToday: data.remainingToday ?? 0,
+    };
+  }
+
   try {
     sessionStorage.setItem(dedupeKey, "1");
   } catch (_) {}

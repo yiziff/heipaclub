@@ -9,16 +9,27 @@ import {
   emptyHangLaState,
   fanFilterMeta,
   filterArtistsByMinFans,
+  filterArtistsByRegion,
   findArtist,
   hangLaProgress,
+  HANG_LA_REGION_FILTERS,
   hangLaSummaryLines,
   HANG_LA_COUNT,
   HANG_LA_FAN_FILTERS,
   HANG_LA_TIERS,
   placeArtist,
+  regionFilterMeta,
 } from "./hangla.js";
-import { loadArtistCup, pingApi, searchArtist } from "./netease.js";
+import { loadArtistCup, pingApi, searchArtist as searchNeteaseArtist } from "./netease.js";
+import {
+  enrichSongsPlaySourceProgressive,
+  loadArtistCup as loadItunesArtistCup,
+  pingApi as pingItunesApi,
+  resolvePlaySource,
+  searchArtist as searchItunesArtist,
+} from "./itunes.js";
 import { createPlayer } from "./player.js";
+import QRCode from "qrcode";
 import {
   fetchArtistRank,
   fetchSongRank,
@@ -41,8 +52,11 @@ import {
 const STORAGE_KEY = "cn-rap-cup:v5";
 const TOP_N = 50;
 const FIELD_MAX = 32;
+const SITE_URL = "https://heipaclub.com";
 const app = document.getElementById("app");
 const artistCache = new Map();
+const runtimeArtistCatalog = new Map();
+const avatarFillInFlight = new Set();
 
 function loadState() {
   try {
@@ -147,32 +161,65 @@ function bindBack() {
 }
 
 async function softFillAvatars() {
-  for (const a of ARTISTS) {
-    if (a.avatar) continue;
-    try {
-      const hits = await searchArtist(a.search || a.name);
-      if (hits[0]?.avatar) {
-        a.avatar = hits[0].avatar;
-        const node = app.querySelector(`[data-artist="${a.id}"] .artist-avatar, [data-artist="${a.id}"] .img-fallback`);
-        if (node && location.hash.replace(/^#/, "") === "/") {
-          const img = document.createElement("img");
-          img.className = "artist-avatar";
-          img.src = a.avatar;
-          img.alt = a.name;
-          img.loading = "lazy";
-          img.referrerPolicy = "no-referrer";
-          node.replaceWith(img);
-        }
+  const noAvatar = ARTISTS.filter((a) => !a.avatar);
+  if (!noAvatar.length) return;
+  let cursor = 0;
+  const workers = Math.min(6, noAvatar.length);
+  async function worker() {
+    while (cursor < noAvatar.length) {
+      const idx = cursor++;
+      await fillAvatarForArtist(noAvatar[idx]);
+    }
+  }
+  await Promise.all(Array.from({ length: workers }, () => worker()));
+}
+
+function patchAvatarDom(artist) {
+  const node = app.querySelector(`[data-artist="${artist.id}"] .artist-avatar, [data-artist="${artist.id}"] .img-fallback`);
+  if (!node || !artist.avatar || location.hash.replace(/^#/, "") !== "/") return;
+  const img = document.createElement("img");
+  img.className = "artist-avatar";
+  img.src = artist.avatar;
+  img.alt = artist.name;
+  img.loading = "lazy";
+  img.referrerPolicy = "no-referrer";
+  node.replaceWith(img);
+}
+
+async function fillAvatarForArtist(artist) {
+  if (!artist || artist.avatar) return;
+  if (avatarFillInFlight.has(artist.id)) return;
+  avatarFillInFlight.add(artist.id);
+  try {
+    if (artist.source === "itunes") {
+      // iTunes artist search lacks avatar; fetch one top song to get artwork quickly.
+      const loaded = await loadItunesArtistCup(artist, { limit: 1 });
+      if (loaded?.avatar) {
+        artist.avatar = loaded.avatar;
+        patchAvatarDom(artist);
+        return;
       }
-    } catch (_) {}
+    }
+    const hits = await searchNeteaseArtist(artist.search || artist.name);
+    if (hits[0]?.avatar) {
+      artist.avatar = hits[0].avatar;
+      patchAvatarDom(artist);
+    }
+  } catch (_) {
+    // best-effort avatar hydration
+  } finally {
+    avatarFillInFlight.delete(artist.id);
   }
 }
 
 async function hydrateArtist(id) {
   if (artistCache.has(id)) return artistCache.get(id);
-  const base = getArtist(id);
+  const base = getArtist(id) || runtimeArtistCatalog.get(id);
   if (!base) return null;
-  const live = await loadArtistCup(base, { limit: TOP_N });
+  const live =
+    base.source === "itunes"
+      ? await loadItunesArtistCup(base, { limit: TOP_N })
+      : await loadArtistCup(base, { limit: TOP_N });
   artistCache.set(id, live);
   // also stash avatar on catalog for home
   base.avatar = live.avatar;
@@ -182,13 +229,38 @@ async function hydrateArtist(id) {
 function renderHome() {
   /** @type {"fans" | "alpha" | "rank"} */
   let sortMode = "fans";
+  /** @type {"all" | "cn" | "west"} */
+  let regionMode = "all";
   /** neteaseArtistId or name → wins */
   const rankWins = new Map();
 
-  const filteredList = (q = "") => {
+  const norm = (s) =>
+    String(s || "")
+      .toLowerCase()
+      .replace(/\s+/g, "")
+      .replace(/[·．._\-#（）()]/g, "");
+
+  const artistRegion = (artist) => {
+    const city = String(artist?.city || "");
+    const tag = String(artist?.tag || "");
+    if (city.includes("欧美") || tag.includes("欧美")) return "west";
+    return "cn";
+  };
+
+  const defaultHomeList = [...ARTISTS]
+    .sort((a, b) => Number(b.fans || 0) - Number(a.fans || 0))
+    .slice(0, 50);
+
+  const filteredLocalList = (q = "") => {
     const query = q.trim().toLowerCase();
-    if (!query) return [...ARTISTS];
-    return ARTISTS.filter((a) =>
+    const pool = query
+      ? ARTISTS
+      : regionMode === "all"
+        ? defaultHomeList
+        : ARTISTS;
+    const regioned = pool.filter((a) => regionMode === "all" || artistRegion(a) === regionMode);
+    if (!query) return [...regioned];
+    return regioned.filter((a) =>
       [a.name, a.search, a.city, a.tag, a.blurb]
         .join(" ")
         .toLowerCase()
@@ -223,12 +295,69 @@ function renderHome() {
     return arr;
   };
 
-  const paintGrid = (q = "") => {
-    const list = sortList(filteredList(q));
+  const toRuntimeArtist = (hit) => {
+    const id = `itunes:${hit.id}`;
+    const existing = runtimeArtistCatalog.get(id);
+    if (existing) {
+      if (!existing.avatar && hit.avatar) existing.avatar = hit.avatar;
+      return existing;
+    }
+    const created = {
+      id,
+      name: hit.name,
+      search: hit.name,
+      city: "iTunes",
+      tag: "iTunes 搜索",
+      blurb: "来自 iTunes 官方搜索 · 热门 Top 50 可办赛。",
+      avatar: hit.avatar || "",
+      fans: 0,
+      source: "itunes",
+      itunesArtistId: hit.id,
+    };
+    runtimeArtistCatalog.set(id, created);
+    return created;
+  };
+
+  const mergeWithItunes = async (query, localList) => {
+    const q = String(query || "").trim();
+    if (!q) return localList;
+    try {
+      const hits = await searchItunesArtist(q, { limit: 8 });
+      if (!hits.length) return localList;
+      const seen = new Set(localList.map((a) => norm(a.name || a.search)));
+      const extra = [];
+      for (const hit of hits) {
+        const key = norm(hit.name);
+        if (seen.has(key)) continue;
+        seen.add(key);
+        extra.push(toRuntimeArtist(hit));
+      }
+      return [...localList, ...extra];
+    } catch {
+      return localList;
+    }
+  };
+
+  let searchToken = 0;
+  const paintGrid = async (q = "") => {
+    const token = ++searchToken;
+    const localList = sortList(filteredLocalList(q));
+    let list = localList;
     const grid = document.getElementById("artist-grid");
     const count = document.getElementById("artist-count");
     if (!grid) return;
-    if (count) count.textContent = `${list.length} / ${ARTISTS.length} 位 Rapper`;
+    const query = String(q || "").trim();
+    if (query) {
+      grid.innerHTML = `<p class="loading-line">正在搜索 iTunes 歌手…</p>`;
+      list = sortList(await mergeWithItunes(query, localList));
+      list = list.filter((a) => regionMode === "all" || artistRegion(a) === regionMode);
+      if (token !== searchToken) return;
+    }
+    if (count) {
+      count.textContent = query
+        ? `${list.length} 位匹配（本地 + iTunes）`
+        : `${list.length} / ${ARTISTS.length} 位 Rapper（首页展示）`;
+    }
     grid.innerHTML = list.length
       ? list
           .map((a) => {
@@ -242,8 +371,12 @@ function renderHome() {
           ${imgTag(a.avatar, { alt: a.name, className: "artist-avatar" })}
           <div class="artist-card-body">
             <div class="name">${esc(a.name)}</div>
-            <p class="meta">${esc(a.city)} · ${esc(a.tag)}${
-              a.fans ? ` · ${Number(a.fans).toLocaleString("zh-CN")} 粉` : ` · 热门 ${TOP_N}`
+            <p class="meta">${
+                  a.fans
+                    ? `${Number(a.fans).toLocaleString("zh-CN")} 粉`
+                    : a.source === "itunes"
+                      ? "iTunes"
+                      : `热门 ${TOP_N}`
             }${winMeta}</p>
           </div>
         </button>`;
@@ -254,16 +387,27 @@ function renderHome() {
     grid.querySelectorAll("[data-artist]").forEach((btn) => {
       btn.addEventListener("click", () => navigate(`/artist/${btn.dataset.artist}`));
     });
+
+    // Hydrate visible cards first to reduce blank avatars / late popping.
+    list.slice(0, 24).forEach((a) => {
+      if (!a.avatar) fillAvatarForArtist(a);
+    });
   };
 
   app.innerHTML = shell(`
     <section class="hero">
       <h1>真黑怕<br /><em>巅峰对决</em></h1>
     </section>
-    <div class="section-title">选择歌手 <span id="artist-count">${ARTISTS.length} / ${ARTISTS.length} 位 Rapper</span></div>
+    <div class="section-title">选择歌手 <span id="artist-count">50 / ${ARTISTS.length} 位 Rapper（首页展示）</span></div>
     <div class="search-row search-row-with-hangla">
-      <input id="artist-search" type="search" placeholder="搜：扬布拉德 / Digi / 新说唱 / 成都…" autocomplete="off" />
+      <input id="artist-search" type="search" placeholder="搜：歌手名（本地 + iTunes）…" autocomplete="off" />
       <button type="button" class="hangla-inline-btn" id="hangla-entry">从夯到拉 · 抽 15 排</button>
+    </div>
+    <div class="filter-row sort-row" id="region-row" role="group" aria-label="地区筛选">
+      <span class="sort-label">范围</span>
+      <button type="button" class="mode-chip active" data-region="all">全部</button>
+      <button type="button" class="mode-chip" data-region="cn">中文</button>
+      <button type="button" class="mode-chip" data-region="west">欧美</button>
     </div>
     <div class="filter-row sort-row" id="sort-row" role="group" aria-label="排序方式">
       <span class="sort-label">排序</span>
@@ -279,7 +423,13 @@ function renderHome() {
   document.getElementById("hangla-entry")?.addEventListener("click", () => navigate("/hangla"));
 
   const input = document.getElementById("artist-search");
-  const apply = () => paintGrid(input?.value || "");
+  let timer = null;
+  const apply = () => {
+    clearTimeout(timer);
+    timer = setTimeout(() => {
+      paintGrid(input?.value || "");
+    }, 180);
+  };
   input?.addEventListener("input", apply);
 
   document.querySelectorAll("#sort-row [data-sort]").forEach((chip) => {
@@ -287,6 +437,15 @@ function renderHome() {
       sortMode = chip.dataset.sort || "fans";
       document
         .querySelectorAll("#sort-row .mode-chip")
+        .forEach((c) => c.classList.toggle("active", c === chip));
+      apply();
+    });
+  });
+  document.querySelectorAll("#region-row [data-region]").forEach((chip) => {
+    chip.addEventListener("click", () => {
+      regionMode = chip.dataset.region || "all";
+      document
+        .querySelectorAll("#region-row .mode-chip")
         .forEach((c) => c.classList.toggle("active", c === chip));
       apply();
     });
@@ -343,13 +502,16 @@ function hangLaBlindCard(artist) {
 
 function renderHangLa() {
   let fanFilterId = "any";
+  let regionFilterId = "cn";
   let playMode = "open"; // open | blind
   let state = null;
   let selectedId = null;
   let toastTimer = null;
 
   const minFansOf = () => fanFilterMeta(fanFilterId).minFans;
-  const eligibleCount = () => filterArtistsByMinFans(ARTISTS, minFansOf()).length;
+  const regionOf = () => regionFilterMeta(regionFilterId).id;
+  const eligibleCount = () =>
+    filterArtistsByMinFans(filterArtistsByRegion(ARTISTS, regionOf()), minFansOf()).length;
   const modeLabel = () => (playMode === "blind" || state?.mode === "blind" ? "盲排" : "明牌");
 
   const showToast = (msg) => {
@@ -363,7 +525,10 @@ function renderHangLa() {
   };
 
   const startRound = () => {
-    const field = drawHangLaField(ARTISTS, HANG_LA_COUNT, { minFans: minFansOf() });
+    const field = drawHangLaField(ARTISTS, HANG_LA_COUNT, {
+      minFans: minFansOf(),
+      region: regionOf(),
+    });
     if (field.length < 3) {
       showToast("符合条件的 Rapper 太少，请降低粉丝门槛");
       return false;
@@ -374,6 +539,7 @@ function renderHangLa() {
   };
 
   const fanLabel = () => fanFilterMeta(fanFilterId).label;
+  const regionLabel = () => regionFilterMeta(regionFilterId).label;
 
   const paint = (mode = "setup") => {
     if (mode === "setup") {
@@ -398,6 +564,16 @@ function renderHangLa() {
                 : "明牌：先看到全部 15 人，再自由分档。"
             }</p>
 
+            <div class="hangla-section-label">抽签范围</div>
+            <div class="filter-row sort-row" id="hangla-region-row" role="group" aria-label="抽签范围">
+              ${HANG_LA_REGION_FILTERS.map(
+                (f) => `
+                <button type="button" class="mode-chip hangla-region-chip${f.id === regionFilterId ? " active" : ""}" data-region-filter="${f.id}">
+                  ${esc(f.label)}
+                </button>`
+              ).join("")}
+            </div>
+
             <div class="hangla-section-label">网易云粉丝最低要求</div>
             <div class="filter-row sort-row" id="hangla-fan-row" role="group" aria-label="粉丝门槛">
               ${HANG_LA_FAN_FILTERS.map(
@@ -407,7 +583,7 @@ function renderHangLa() {
                 </button>`
               ).join("")}
             </div>
-            <p class="hangla-setup-meta">当前池子约 <strong>${count}</strong> 位 · 将随机抽取 ${Math.min(
+            <p class="hangla-setup-meta">当前池子（${esc(regionLabel())}）约 <strong>${count}</strong> 位 · 将随机抽取 ${Math.min(
               HANG_LA_COUNT,
               count
             )} 人</p>
@@ -425,6 +601,12 @@ function renderHangLa() {
       document.querySelectorAll("#hangla-mode-row [data-play-mode]").forEach((chip) => {
         chip.addEventListener("click", () => {
           playMode = chip.dataset.playMode === "blind" ? "blind" : "open";
+          paint("setup");
+        });
+      });
+      document.querySelectorAll("#hangla-region-row [data-region-filter]").forEach((chip) => {
+        chip.addEventListener("click", () => {
+          regionFilterId = chip.dataset.regionFilter || "all";
           paint("setup");
         });
       });
@@ -460,7 +642,7 @@ function renderHangLa() {
         <section class="hangla-screen">
           <header class="hangla-head">
             <h1>从夯到拉 · 结果</h1>
-            <p>${esc(modeLabel())} · 粉丝门槛 ${esc(fanLabel())} · 随机 ${state.field.length} 位 · 夯最多 2 人</p>
+            <p>${esc(modeLabel())} · ${esc(regionLabel())} · 粉丝门槛 ${esc(fanLabel())} · 随机 ${state.field.length} 位 · 夯最多 2 人</p>
           </header>
           <div class="hangla-result">
             ${HANG_LA_TIERS.map((t) => {
@@ -498,7 +680,7 @@ function renderHangLa() {
       );
       bindBack();
       document.getElementById("hangla-copy")?.addEventListener("click", async () => {
-        const text = [`真黑怕 · 从夯到拉 · ${modeLabel()}（${fanLabel()}）`, ...lines].join("\n");
+        const text = [`真黑怕 · 从夯到拉 · ${modeLabel()}（${regionLabel()} / ${fanLabel()}）`, ...lines].join("\n");
         try {
           await navigator.clipboard.writeText(text);
           showToast("已复制到剪贴板");
@@ -565,8 +747,8 @@ function renderHangLa() {
           <h1>从夯到拉${blind ? " · 盲排" : ""}</h1>
           <p>${
             blind
-              ? `粉丝门槛 ${esc(fanLabel())} · 一次只亮一位 · 「夯」最多 2 人 · 进度 ${progress.placed} / ${progress.total}`
-              : `粉丝门槛 ${esc(fanLabel())} · 先点人再点档位 · 「夯」最多 2 人 · 进度 ${progress.placed} / ${progress.total}`
+              ? `${esc(regionLabel())} · 粉丝门槛 ${esc(fanLabel())} · 一次只亮一位 · 「夯」最多 2 人 · 进度 ${progress.placed} / ${progress.total}`
+              : `${esc(regionLabel())} · 粉丝门槛 ${esc(fanLabel())} · 先点人再点档位 · 「夯」最多 2 人 · 进度 ${progress.placed} / ${progress.total}`
           }</p>
         </header>
 
@@ -701,7 +883,7 @@ function renderHangLa() {
 }
 
 async function renderSetup(artistId) {
-  const base = getArtist(artistId);
+  const base = getArtist(artistId) || runtimeArtistCatalog.get(artistId);
   if (!base) {
     app.innerHTML = shell(
       `<section class="setup"><p class="loading-line">名单里没有这位歌手</p></section>`,
@@ -719,9 +901,13 @@ async function renderSetup(artistId) {
 
   let artist;
   try {
-    const online = await pingApi();
+    const online = base.source === "itunes" ? await pingItunesApi() : await pingApi();
     if (!online) {
-      throw new Error("连不上音乐接口，请先启动本地服务后再刷新");
+      throw new Error(
+        base.source === "itunes"
+          ? "连不上 iTunes 接口，请检查网络后重试"
+          : "连不上音乐接口，请先启动本地服务后再刷新"
+      );
     }
     artist = await hydrateArtist(artistId);
   } catch (e) {
@@ -776,6 +962,12 @@ async function renderSetup(artistId) {
                     mode === "battle" && i % 2 === 0 && preview[i + 1]
                       ? ` · vs ${esc(preview[i + 1].title)}`
                       : ""
+                  }${
+                    s.playSource === "itunes"
+                      ? " · Apple"
+                      : s.playSource === "netease"
+                        ? " · 网易云"
+                        : ""
                   }</em>
                 </span>
               </li>`
@@ -801,20 +993,60 @@ async function renderSetup(artistId) {
       paint();
     });
 
-    document.getElementById("start-btn").addEventListener("click", () => {
-      const bracket = buildBracket(artist.songs, {
-        mode,
-        max: FIELD_MAX,
-        field: fieldSongs,
-      });
-      saveState({
-        artistId: artist.id,
-        artistName: artist.name,
-        artistAvatar: artist.avatar || "",
-        neteaseArtistId: artist.neteaseArtistId || "",
-        bracket,
-      });
-      navigate("/bracket");
+    document.getElementById("start-btn").addEventListener("click", async () => {
+      const btn = document.getElementById("start-btn");
+      const prevLabel = btn.textContent;
+      btn.disabled = true;
+      btn.textContent = "准备开赛…";
+      const aliases = [artist.search, artist.neteaseArtistName].filter(Boolean);
+      try {
+        // First 4 songs ≈ first 2 matches — enough to start; rest match in background
+        const { songs: partial, background } = await enrichSongsPlaySourceProgressive(
+          fieldSongs,
+          artist.name,
+          {
+            concurrency: 6,
+            artistAliases: aliases,
+            readyCount: 4,
+            onSong: (song) => {
+              const s = loadState();
+              if (!s?.bracket) return;
+              s.bracket = patchPlaySourceInBracket(s.bracket, song);
+              saveState(s);
+            },
+          }
+        );
+        fieldSongs = partial;
+        const bracket = buildBracket(artist.songs, {
+          mode,
+          max: FIELD_MAX,
+          field: fieldSongs,
+        });
+        saveState({
+          artistId: artist.id,
+          artistName: artist.name,
+          artistAvatar: artist.avatar || "",
+          neteaseArtistId: artist.neteaseArtistId || "",
+          artistSearch: artist.search || "",
+          playSourceReady: 4,
+          bracket,
+        });
+        navigate("/bracket");
+        background
+          .then((all) => {
+            const s = loadState();
+            if (!s?.bracket) return;
+            const itunesN = all.filter((x) => x.playSource === "itunes").length;
+            s.playSourceStats = { itunes: itunesN, total: all.length };
+            s.playSourceReady = all.length;
+            saveState(s);
+          })
+          .catch(() => {});
+      } catch (e) {
+        btn.disabled = false;
+        btn.textContent = prevLabel;
+        alert(`准备开赛失败：${e.message || e}`);
+      }
     });
   };
 
@@ -824,6 +1056,47 @@ async function renderSetup(artistId) {
 function songKey(song) {
   if (!song) return "";
   return String(song.id || song.neteaseId || song.title || "");
+}
+
+/** Merge iTunes/netease play fields into every copy of a song inside the bracket. */
+function patchPlaySourceInBracket(bracket, song) {
+  const key = songKey(song);
+  if (!key || !bracket) return bracket;
+  const patch = (s) => {
+    if (!s || songKey(s) !== key) return s;
+    return {
+      ...s,
+      playSource: song.playSource,
+      previewUrl: song.previewUrl || "",
+      itunesTrackId: song.itunesTrackId || "",
+      trackViewUrl: song.trackViewUrl || "",
+    };
+  };
+  return {
+    ...bracket,
+    rounds: (bracket.rounds || []).map((round) =>
+      round.map((m) => ({
+        ...m,
+        a: patch(m.a),
+        b: patch(m.b),
+        winner: m.winner ? patch(m.winner) : m.winner,
+      }))
+    ),
+    champion: bracket.champion ? patch(bracket.champion) : null,
+  };
+}
+
+async function ensureSongPlaySource(state, song) {
+  if (!song) return song;
+  if (song.playSource === "itunes" || song.playSource === "netease") return song;
+  const aliases = [state.artistSearch, state.artistName].filter(Boolean);
+  const resolved = await resolvePlaySource(song, state.artistName, {
+    artistAliases: aliases,
+  });
+  const nextBracket = patchPlaySourceInBracket(state.bracket, resolved);
+  const next = { ...state, bracket: nextBracket };
+  saveState(next);
+  return resolved;
 }
 
 function isSameSong(a, b) {
@@ -1131,12 +1404,17 @@ function fitBracketToScreen() {
 
   board.style.transform = "none";
 
-  const availW = fit.clientWidth;
-  const availH = fit.clientHeight || Math.max(320, window.innerHeight - 200);
+  // Use viewport-bounded width — board is width:max-content and must not inflate availW
+  const parentW = fit.parentElement?.getBoundingClientRect().width || window.innerWidth;
+  const availW = Math.min(fit.getBoundingClientRect().width || fit.clientWidth, parentW, window.innerWidth - 8);
+  const availH = Math.min(
+    fit.clientHeight || 0,
+    Math.max(280, window.innerHeight - (window.innerWidth <= 720 ? 160 : 200))
+  ) || Math.max(280, window.innerHeight - 200);
   const needW = Math.max(board.scrollWidth, 1);
   const needH = Math.max(board.scrollHeight, 1);
-  // Fill the available area (scale up or down)
-  const scale = Math.min(availW / needW, availH / needH) * 0.98;
+  const pad = window.innerWidth <= 720 ? 0.9 : 0.98;
+  const scale = Math.min(availW / needW, availH / needH) * pad;
 
   board.style.transformOrigin = "center center";
   board.style.transform = `scale(${scale})`;
@@ -1258,11 +1536,17 @@ function renderMatch(state) {
   const player = createPlayer(document.getElementById("player-mount"));
 
   app.querySelectorAll("[data-preview]").forEach((btn) => {
-    btn.addEventListener("click", (e) => {
+    btn.addEventListener("click", async (e) => {
       e.stopPropagation();
       const side = btn.dataset.preview;
-      const song = side === "a" ? match.a : match.b;
-      player.load(song, { autoplay: true });
+      const raw = side === "a" ? match.a : match.b;
+      const latest = loadState() || state;
+      const song = await ensureSongPlaySource(latest, raw);
+      player.load(song, {
+        autoplay: true,
+        artistName: latest.artistName || "",
+        artistAliases: [latest.artistSearch].filter(Boolean),
+      });
     });
   });
 
@@ -1380,6 +1664,14 @@ function openShareBracket(state) {
       <div class="share-bracket-stage" id="share-bracket-capture">
         <div class="share-bracket-brand">真黑怕巅峰对决</div>
         ${renderBracketHtml(state.bracket, avatar)}
+        <div class="share-bracket-qr">
+          <canvas id="share-qr-canvas" width="132" height="132" aria-label="网站二维码"></canvas>
+          <div class="share-bracket-qr-copy">
+            <strong>扫码来玩</strong>
+            <span>heipaclub.com</span>
+            <em>微信扫一扫打开本站</em>
+          </div>
+        </div>
       </div>
     </div>
   `;
@@ -1402,6 +1694,15 @@ function openShareBracket(state) {
     fitShare();
     requestAnimationFrame(fitShare);
   });
+  const qrCanvas = el.querySelector("#share-qr-canvas");
+  if (qrCanvas) {
+    QRCode.toCanvas(qrCanvas, SITE_URL, {
+      width: 132,
+      margin: 1,
+      color: { dark: "#111110", light: "#ffffff" },
+      errorCorrectionLevel: "M",
+    }).catch(() => {});
+  }
   el.querySelectorAll("img").forEach((img) => {
     if (!img.complete) img.addEventListener("load", fitShare, { once: true });
   });
@@ -1434,11 +1735,11 @@ function openShareBracket(state) {
   });
 }
 
-/** Draw a shareable PNG card (no remote images — avoids canvas CORS taint). */
+/** Draw a shareable PNG card — portrait bracket for mobile WeChat shares. */
 async function downloadShareCard(state) {
-  const { champion, runnerUp, semis } = podiumFromBracket(state.bracket);
+  const { champion } = podiumFromBracket(state.bracket);
   const W = 1080;
-  const H = 1520;
+  const H = 1920;
   const canvas = document.createElement("canvas");
   canvas.width = W;
   canvas.height = H;
@@ -1452,65 +1753,62 @@ async function downloadShareCard(state) {
 
   ctx.fillStyle = "#111110";
   ctx.font = "600 28px Noto Sans SC, sans-serif";
-  ctx.fillText("真黑怕巅峰对决", 72, 90);
-  ctx.font = "400 34px Noto Sans SC, sans-serif";
+  ctx.fillText("真黑怕巅峰对决", 64, 78);
+  ctx.font = "400 30px Noto Sans SC, sans-serif";
   ctx.fillStyle = "#5c5a55";
-  ctx.fillText(`${state.artistName} · 冠军诞生`, 72, 140);
+  ctx.fillText(`${state.artistName} · 冠军诞生`, 64, 122);
 
-  // champion block
+  // champion banner (compact)
   ctx.fillStyle = "#b8ff1a";
-  roundRect(ctx, 72, 180, W - 144, 280, 16);
+  roundRect(ctx, 64, 150, W - 128, 200, 16);
   ctx.fill();
   ctx.fillStyle = "#111110";
-  ctx.font = "700 42px Bebas Neue, sans-serif";
-  ctx.fillText("CHAMPION", 104, 250);
-  ctx.font = "700 64px Noto Sans SC, sans-serif";
+  ctx.font = "700 36px Bebas Neue, sans-serif";
+  ctx.fillText("CHAMPION", 96, 210);
+  ctx.font = "700 56px Noto Sans SC, sans-serif";
   const champTitle = champion?.title || "";
-  ctx.fillText(champTitle.length > 14 ? `${champTitle.slice(0, 14)}…` : champTitle, 104, 340);
-  ctx.font = "400 28px Noto Sans SC, sans-serif";
+  ctx.fillText(champTitle.length > 12 ? `${champTitle.slice(0, 12)}…` : champTitle, 96, 280);
+  ctx.font = "400 24px Noto Sans SC, sans-serif";
   ctx.fillStyle = "#333";
-  ctx.fillText(metaLine(champion) || state.artistName, 104, 400);
+  ctx.fillText(metaLine(champion) || state.artistName, 96, 320);
 
-  // podium
-  const cards = [
-    { label: "亚军 · RUNNER-UP", song: runnerUp },
-    { label: "四强 · SEMI", song: semis[0] },
-    { label: "四强 · SEMI", song: semis[1] },
-  ];
-  cards.forEach((card, i) => {
-    const x = 72 + i * 330;
-    const y = 500;
-    ctx.fillStyle = "rgba(255,255,255,0.78)";
-    roundRect(ctx, x, y, 300, 140, 12);
-    ctx.fill();
-    ctx.fillStyle = "#5c5a55";
-    ctx.font = "600 18px Noto Sans SC, sans-serif";
-    ctx.fillText(card.label, x + 24, y + 48);
-    ctx.fillStyle = "#111110";
-    ctx.font = "700 28px Noto Sans SC, sans-serif";
-    const t = card.song?.title || "—";
-    ctx.fillText(t.length > 9 ? `${t.slice(0, 9)}…` : t, x + 24, y + 98);
-  });
-
-  // 晋级之路（完整签表视觉在分享弹层里截图）
   ctx.fillStyle = "#111110";
   ctx.font = "700 28px Noto Sans SC, sans-serif";
-  ctx.fillText("晋级之路", 72, 710);
+  ctx.fillText("夺冠对阵图", 64, 400);
+  ctx.fillStyle = "#5c5a55";
+  ctx.font = "400 20px Noto Sans SC, sans-serif";
+  ctx.fillText("8强 → 决赛（晋级高亮）", 64, 432);
 
-  const path = uniquePath(state.bracket.path || [], champion);
-  let y = 760;
-  path.forEach((s, i) => {
-    const mark = i === path.length - 1 ? "👑 " : `${i + 1}. `;
-    ctx.fillStyle = i === path.length - 1 ? "#111110" : "#5c5a55";
-    ctx.font = `${i === path.length - 1 ? "700" : "400"} 26px Noto Sans SC, sans-serif`;
-    const t = `${mark}${s.title}`;
-    ctx.fillText(t.length > 28 ? `${t.slice(0, 28)}…` : t, 96, y);
-    y += 40;
+  drawPortraitShareBracket(ctx, state.bracket, champion, 40, 460, W - 80, 1180);
+
+  // QR → heipaclub.com
+  const qrSize = 160;
+  const qrDataUrl = await QRCode.toDataURL(SITE_URL, {
+    width: qrSize,
+    margin: 1,
+    color: { dark: "#111110", light: "#ffffff" },
+    errorCorrectionLevel: "M",
   });
+  const qrImg = await loadImageFromUrl(qrDataUrl);
+  const qrX = 64;
+  const qrY = H - 230;
+  ctx.fillStyle = "#ffffff";
+  roundRect(ctx, qrX - 10, qrY - 10, qrSize + 20, qrSize + 20, 12);
+  ctx.fill();
+  ctx.drawImage(qrImg, qrX, qrY, qrSize, qrSize);
+
+  ctx.fillStyle = "#111110";
+  ctx.font = "700 28px Noto Sans SC, sans-serif";
+  ctx.fillText("扫码来玩", qrX + qrSize + 32, qrY + 52);
+  ctx.fillStyle = "#5c5a55";
+  ctx.font = "400 24px Noto Sans SC, sans-serif";
+  ctx.fillText("heipaclub.com", qrX + qrSize + 32, qrY + 94);
+  ctx.font = "400 20px Noto Sans SC, sans-serif";
+  ctx.fillText("微信扫一扫 · 真黑怕巅峰对决", qrX + qrSize + 32, qrY + 130);
 
   ctx.fillStyle = "#5c5a55";
-  ctx.font = "400 22px Noto Sans SC, sans-serif";
-  ctx.fillText(`${state.bracket.size} 强 · ${progressText(state.bracket)}`, 72, H - 48);
+  ctx.font = "400 20px Noto Sans SC, sans-serif";
+  ctx.fillText(`${state.bracket.size} 强 · ${progressText(state.bracket)}`, 64, H - 36);
 
   const blob = await new Promise((resolve, reject) => {
     try {
@@ -1528,7 +1826,7 @@ async function downloadShareCard(state) {
         await navigator.share({
           files: [file],
           title: `${state.artistName} 本命曲对阵图`,
-          text: `冠军：${champion?.title || ""}`,
+          text: `冠军：${champion?.title || ""} · 扫码玩 heipaclub.com`,
         });
         return;
       } catch {
@@ -1543,6 +1841,144 @@ async function downloadShareCard(state) {
   a.download = fileName;
   a.click();
   URL.revokeObjectURL(url);
+}
+
+/**
+ * Mobile-first portrait bracket: from ≤8强 to 决赛, left | center | right
+ * (same structure as on-site 对阵图, text chips — no remote art / CORS).
+ */
+function drawPortraitShareBracket(ctx, bracket, champ, x, y, w, h) {
+  const rounds = bracket?.rounds || [];
+  if (!rounds.length) return;
+  const size = bracket.size || 32;
+
+  let startRi = 0;
+  for (let ri = 0; ri < rounds.length; ri++) {
+    if (size / 2 ** ri <= 8) {
+      startRi = ri;
+      break;
+    }
+  }
+
+  const feederRis = [];
+  for (let ri = startRi; ri < rounds.length - 1; ri++) feederRis.push(ri);
+  const finalRi = rounds.length - 1;
+  const leftCols = feederRis.length;
+  const colCount = Math.max(1, leftCols * 2 + 1);
+  const colW = w / colCount;
+  const pad = 6;
+  const chipW = Math.max(100, colW - pad * 2);
+  const chipH = 40;
+  const matchH = chipH * 2 + 8;
+
+  /** @type {{ id: string, col: number, mx: number, my: number, m: object }[]} */
+  const placed = [];
+
+  function planColumn(matches, colIndex, label) {
+    const colX = x + colIndex * colW + (colW - chipW) / 2;
+    ctx.fillStyle = "#5c5a55";
+    ctx.font = "700 18px Noto Sans SC, sans-serif";
+    ctx.textAlign = "center";
+    ctx.fillText(label, colX + chipW / 2, y + 22);
+    ctx.textAlign = "left";
+
+    const n = Math.max(matches.length, 1);
+    const usable = h - 52;
+    const step = usable / n;
+    matches.forEach((m, i) => {
+      const my = y + 44 + i * step + (step - matchH) / 2;
+      placed.push({ id: m.id, col: colIndex, mx: colX, my, m });
+    });
+  }
+
+  feederRis.forEach((ri, ci) => {
+    const round = rounds[ri] || [];
+    const mid = Math.ceil(round.length / 2);
+    planColumn(round.slice(0, mid), ci, shortRoundLabel(size, ri));
+  });
+
+  const finalMatch = rounds[finalRi]?.[0];
+  if (finalMatch) {
+    planColumn([finalMatch], leftCols, shortRoundLabel(size, finalRi));
+  }
+
+  feederRis.forEach((ri, ci) => {
+    const round = rounds[ri] || [];
+    const mid = Math.ceil(round.length / 2);
+    planColumn(round.slice(mid), colCount - 1 - ci, shortRoundLabel(size, ri));
+  });
+
+  const byId = new Map(placed.map((p) => [p.id, p]));
+
+  // lines under chips
+  for (let ri = startRi; ri < finalRi; ri++) {
+    for (const parent of rounds[ri + 1] || []) {
+      if (!parent?.from) continue;
+      const p = byId.get(parent.id);
+      if (!p) continue;
+      const pCx = p.mx + chipW / 2;
+      const pCy = p.my + matchH / 2;
+      for (const fromId of parent.from) {
+        const c = byId.get(fromId);
+        if (!c) continue;
+        const fromMatch = (rounds[ri] || []).find((mm) => mm.id === fromId);
+        const onPath = Boolean(
+          champ && fromMatch?.winner && isSameSong(fromMatch.winner, champ)
+        );
+        ctx.strokeStyle = onPath ? "rgba(120, 160, 20, 0.9)" : "rgba(17,17,16,0.18)";
+        ctx.lineWidth = onPath ? 3 : 1.5;
+        ctx.beginPath();
+        const cCx = c.mx + chipW / 2;
+        const cCy = c.my + matchH / 2;
+        const midX = (cCx + pCx) / 2;
+        ctx.moveTo(cCx, cCy);
+        ctx.bezierCurveTo(midX, cCy, midX, pCy, pCx, pCy);
+        ctx.stroke();
+      }
+    }
+  }
+
+  for (const p of placed) {
+    drawShareMatchChips(ctx, p.m, champ, p.mx, p.my, chipW, chipH);
+  }
+}
+
+function drawShareMatchChips(ctx, m, champ, x, y, w, chipH) {
+  drawShareSongChip(ctx, m?.a, champ, x, y, w, chipH);
+  drawShareSongChip(ctx, m?.b, champ, x, y + chipH + 6, w, chipH);
+}
+
+function drawShareSongChip(ctx, song, champ, x, y, w, h) {
+  const onPath = Boolean(song && champ && isSameSong(song, champ));
+  ctx.fillStyle = onPath ? "#b8ff1a" : "rgba(255,255,255,0.92)";
+  roundRect(ctx, x, y, w, h, 8);
+  ctx.fill();
+  if (onPath) {
+    ctx.strokeStyle = "#111110";
+    ctx.lineWidth = 2;
+    roundRect(ctx, x, y, w, h, 8);
+    ctx.stroke();
+  }
+  ctx.fillStyle = "#111110";
+  ctx.font = `${onPath ? "700" : "500"} 16px Noto Sans SC, sans-serif`;
+  const title = song?.title || "—";
+  ctx.fillText(clipCanvasText(ctx, title, w - 16), x + 8, y + h / 2 + 5);
+}
+
+function clipCanvasText(ctx, text, maxW) {
+  if (ctx.measureText(text).width <= maxW) return text;
+  let t = String(text);
+  while (t.length > 1 && ctx.measureText(`${t}…`).width > maxW) t = t.slice(0, -1);
+  return `${t}…`;
+}
+
+function loadImageFromUrl(url) {
+  return new Promise((resolve, reject) => {
+    const img = new Image();
+    img.onload = () => resolve(img);
+    img.onerror = () => reject(new Error("qr image load failed"));
+    img.src = url;
+  });
 }
 
 function roundRect(ctx, x, y, w, h, r) {

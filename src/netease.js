@@ -60,17 +60,15 @@ export async function searchArtist(keyword) {
 }
 
 /**
- * Hot top-N songs for an artist (api-enhanced /artist/songs order=hot).
+ * Hot top-N songs for an artist.
+ * Use /artist/top/song (same ranking as NetEase app「热门」),
+ * NOT /artist/songs?order=hot (different sort — e.g. 法老会把苦海无涯顶到第一).
+ * Same title from single + album often both appear; keep the hotter (earlier) one.
  */
 export async function artistTopSongs(artistId, limit = 50) {
-  const data = await getJson("/artist/songs", {
-    id: artistId,
-    order: "hot",
-    limit,
-    offset: 0,
-  });
+  const data = await getJson("/artist/top/song", { id: artistId });
   const songs = data?.songs || data?.hotSongs || [];
-  const mapped = songs.slice(0, limit).map((s) => {
+  const mapped = songs.map((s) => {
     const pic = s.al?.picUrl || "";
     const publishMs = Number(s.publishTime || s.al?.publishTime || 0) || 0;
     const year = publishYear(publishMs);
@@ -89,12 +87,14 @@ export async function artistTopSongs(artistId, limit = 50) {
     };
   });
 
-  const missing = mapped.filter((s) => !s.year).map((s) => s.id);
+  const deduped = dedupeByTitleKeepHotter(mapped).slice(0, limit);
+
+  const missing = deduped.filter((s) => !s.year).map((s) => s.id);
   if (missing.length) {
     try {
       const detail = await getJson("/song/detail", { ids: missing.join(",") });
       const byId = new Map((detail?.songs || []).map((s) => [String(s.id), s]));
-      for (const song of mapped) {
+      for (const song of deduped) {
         if (song.year) continue;
         const raw = byId.get(song.id);
         if (!raw) continue;
@@ -114,7 +114,31 @@ export async function artistTopSongs(artistId, limit = 50) {
     }
   }
 
-  return mapped;
+  return deduped;
+}
+
+/** Normalize title for dedupe: strip feat/parens, case/space/punct. */
+function titleDedupeKey(title) {
+  return String(title || "")
+    .toLowerCase()
+    .replace(/\s*[\(（][^）)]*[\)）]\s*/g, " ")
+    .replace(/\s*(?:feat\.?|ft\.?|with)\s+.+$/i, "")
+    .replace(/\s+/g, "")
+    .replace(/[·．._\-#（）()]/g, "")
+    .trim();
+}
+
+/** Hot list is already popularity-ordered — first win = hotter. */
+function dedupeByTitleKeepHotter(songs) {
+  const seen = new Set();
+  const out = [];
+  for (const s of songs) {
+    const key = titleDedupeKey(s.title);
+    if (!key || seen.has(key)) continue;
+    seen.add(key);
+    out.push(s);
+  }
+  return out;
 }
 
 function publishYear(ms) {

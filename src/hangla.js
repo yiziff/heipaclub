@@ -14,6 +14,12 @@ export const HANG_LA_FAN_FILTERS = [
   { id: "80w", label: "80 万+", minFans: 800_000 },
 ];
 
+/** 抽签范围选项 */
+export const HANG_LA_REGION_FILTERS = [
+  { id: "cn", label: "华语" },
+  { id: "west", label: "欧美" },
+];
+
 export const HANG_LA_TIERS = [
   { id: "hang", label: "夯", max: 2, hint: "最多 2 人" },
   { id: "dingji", label: "顶级", max: Infinity, hint: "" },
@@ -36,13 +42,27 @@ export function filterArtistsByMinFans(artists, minFans = 0) {
   return artists.filter((a) => Number(a.fans || 0) >= min);
 }
 
+export function filterArtistsByRegion(artists, region = "all") {
+  const mode = String(region || "cn");
+  return artists.filter((a) => {
+    const city = String(a.city || "");
+    const tag = String(a.tag || "");
+    const isWest = city.includes("欧美") || tag.includes("欧美");
+    return mode === "west" ? isWest : !isWest;
+  });
+}
+
 export function fanFilterMeta(id) {
   return HANG_LA_FAN_FILTERS.find((f) => f.id === id) || HANG_LA_FAN_FILTERS[0];
 }
 
+export function regionFilterMeta(id) {
+  return HANG_LA_REGION_FILTERS.find((f) => f.id === id) || HANG_LA_REGION_FILTERS[0];
+}
+
 /** Random sample of n artists (lightweight cards). */
-export function drawHangLaField(artists, n = HANG_LA_COUNT, { minFans = 0 } = {}) {
-  const eligible = filterArtistsByMinFans(artists, minFans);
+export function drawHangLaField(artists, n = HANG_LA_COUNT, { minFans = 0, region = "all" } = {}) {
+  const eligible = filterArtistsByMinFans(filterArtistsByRegion(artists, region), minFans);
   const pool = shuffleInPlace(
     eligible.map((a) => ({
       id: String(a.id),

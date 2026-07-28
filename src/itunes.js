@@ -65,9 +65,11 @@ export async function pingApi() {
 /**
  * Search music artists. Fast path: cn first, then hk if needed.
  */
-export async function searchArtist(keyword, { limit = 8, countries = ["cn", "hk"] } = {}) {
+export async function searchArtist(keyword, { limit = 8, countries = ["cn", "hk", "us"] } = {}) {
   const want = String(keyword || "").trim();
   if (!want) return [];
+  const wantNorm = norm(want);
+  const isShortLatin = /^[a-z0-9.$#\-_]{1,5}$/i.test(wantNorm);
   const pooled = new Map();
 
   for (const country of countries) {
@@ -82,7 +84,9 @@ export async function searchArtist(keyword, { limit = 8, countries = ["cn", "hk"
         if (!a.artistId || !a.artistName) continue;
         const id = String(a.artistId);
         const score = nameScore(want, a.artistName);
-        if (score < 40) continue;
+        // Short latin queries like "Lu1" need looser threshold.
+        const minScore = isShortLatin ? 10 : 40;
+        if (score < minScore) continue;
         const prev = pooled.get(id);
         if (!prev || score > prev.score) {
           pooled.set(id, {
@@ -274,4 +278,245 @@ export async function loadArtistCup(catalogArtist, { limit = 50 } = {}) {
     avatar: catalogArtist.avatar || songs.find((s) => s.cover)?.cover || "",
     songs,
   };
+}
+
+/** Strip feat./parens noise before title compare. */
+function titleCore(s) {
+  return String(s || "")
+    .replace(/\s*[\(（][^）)]*[\)）]\s*/g, " ")
+    .replace(/\s*(?:feat\.?|ft\.?|with)\s+.+$/i, "")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+function titleScore(want, got) {
+  const a = norm(titleCore(want));
+  const b = norm(titleCore(got));
+  if (!a || !b) return 0;
+  if (a === b) return 100;
+  if (a.includes(b) || b.includes(a)) return 85;
+  return 0;
+}
+
+const playSourceCache = new Map();
+
+/** Common CN roster name → Apple Music / iTunes artist names */
+const ITUNES_NAME_HINTS = {
+  马思唯: ["Masiwei", "Higher Brothers"],
+  法老: ["Pharaoh"],
+  姜云升: ["Jiang Yunsheng"],
+  "GAI周延": ["GAI", "GAI Zhouyan"],
+  GAI周延: ["GAI"],
+  艾志恒Asen: ["Asen", "艾志恒"],
+  艾志恒: ["Asen"],
+  罗言: ["罗言"],
+  Jony: ["Jony J"],
+  "Jony J": ["Jony J"],
+  TizzyT: ["Tizzy T"],
+  "Tizzy T": ["Tizzy T"],
+  Rapeter: ["Rapeter", "Rapeter吴嘉轩"],
+  王以太: ["Wang Yitai"],
+};
+
+function splitArtistCredits(raw) {
+  return String(raw || "")
+    .split(/[,，、/&]|(?:\s+feat\.?\s+)|(?:\s+ft\.?\s+)|(?:\s+with\s+)/i)
+    .map((s) => s.trim())
+    .filter(Boolean);
+}
+
+function latinTokens(s) {
+  return (String(s || "").match(/[A-Za-z][A-Za-z0-9.$#]{1,}/g) || []).filter((t) => t.length >= 3);
+}
+
+function expandArtistAliases(artistName, song, artistAliases = []) {
+  const base = [
+    artistName,
+    song?.artist,
+    ...artistAliases,
+    ...splitArtistCredits(song?.artist),
+    ...splitArtistCredits(artistName),
+  ];
+  const out = [];
+  const seen = new Set();
+  for (const raw of base) {
+    const s = String(raw || "").trim();
+    if (!s) continue;
+    const candidates = [s, ...latinTokens(s), ...(ITUNES_NAME_HINTS[s] || [])];
+    // also hints keyed by roster name contained in string
+    for (const [cn, en] of Object.entries(ITUNES_NAME_HINTS)) {
+      if (s.includes(cn)) candidates.push(...en);
+    }
+    for (const c of candidates) {
+      const key = norm(c);
+      if (!key || seen.has(key)) continue;
+      seen.add(key);
+      out.push(c);
+    }
+  }
+  return out;
+}
+
+/**
+ * Match a NetEase-picked song to an iTunes track with previewUrl.
+ * Conservative thresholds: prefer miss → netease over wrong Apple track.
+ */
+export async function resolvePlaySource(
+  song,
+  artistName,
+  { countries = ["cn", "hk", "us"], artistAliases = [], bypassCache = false } = {}
+) {
+  const title = String(song?.title || "").trim();
+  const artists = expandArtistAliases(artistName, song, artistAliases);
+  if (!title) {
+    return { ...song, playSource: "netease", previewUrl: song?.previewUrl || "" };
+  }
+
+  const cacheKey = `v2|${norm(artists.slice(0, 6).join(","))}|${norm(titleCore(title))}`;
+  if (!bypassCache && playSourceCache.has(cacheKey)) {
+    const hit = playSourceCache.get(cacheKey);
+    return { ...song, ...hit };
+  }
+
+  let best = null;
+  let bestScore = 0;
+
+  const searchTerms = [
+    ...artists.slice(0, 4).map((a) => [a, titleCore(title)].join(" ").trim()),
+    titleCore(title),
+  ].filter((t, i, arr) => t && arr.indexOf(t) === i);
+
+  for (const term of searchTerms) {
+    for (const country of countries) {
+      try {
+        const data = await itunesGet("/search", {
+          term,
+          entity: "song",
+          limit: 12,
+          country,
+        });
+        for (const t of data?.results || []) {
+          if (!t?.previewUrl || !t.trackName) continue;
+          const ts = titleScore(title, t.trackName);
+          const as = Math.max(...artists.map((a) => nameScore(a, t.artistName || "")), 0);
+          // Title must be strong; artist soft-match OR exact title with any credit overlap
+          if (ts < 85) continue;
+          if (as < 60 && ts < 100) continue;
+          if (as < 40) continue;
+          const score = ts * 0.7 + Math.max(as, 40) * 0.3;
+          if (score > bestScore) {
+            bestScore = score;
+            best = t;
+          }
+        }
+        if (best && bestScore >= 95) break;
+      } catch {
+        /* try next storefront */
+      }
+    }
+    if (best && bestScore >= 95) break;
+  }
+
+  let patch;
+  if (best) {
+    patch = {
+      playSource: "itunes",
+      previewUrl: best.previewUrl,
+      itunesTrackId: String(best.trackId),
+      trackViewUrl: best.trackViewUrl || best.collectionViewUrl || "",
+    };
+  } else {
+    patch = {
+      playSource: "netease",
+      previewUrl: "",
+      itunesTrackId: "",
+      trackViewUrl: "",
+    };
+  }
+  playSourceCache.set(cacheKey, patch);
+  return { ...song, ...patch };
+}
+
+/**
+ * Enrich a field with playSource. Concurrency capped for iTunes rate.
+ */
+export async function enrichSongsPlaySource(
+  songs,
+  artistName,
+  { concurrency = 5, artistAliases = [] } = {}
+) {
+  const list = Array.isArray(songs) ? songs : [];
+  if (!list.length) return [];
+  const out = list.map((s) => ({ ...s }));
+  let cursor = 0;
+  const workers = Math.min(Math.max(1, concurrency), list.length);
+
+  async function worker() {
+    while (cursor < list.length) {
+      const idx = cursor++;
+      const resolved = await resolvePlaySource(list[idx], artistName, { artistAliases });
+      Object.assign(out[idx], {
+        playSource: resolved.playSource,
+        previewUrl: resolved.previewUrl || "",
+        itunesTrackId: resolved.itunesTrackId || "",
+        trackViewUrl: resolved.trackViewUrl || "",
+      });
+    }
+  }
+
+  await Promise.all(Array.from({ length: workers }, () => worker()));
+  return out;
+}
+
+/**
+ * Enrich first `readyCount` songs (enough to start), return immediately,
+ * keep matching the rest in `background` (mutates song objects + onSong).
+ */
+export async function enrichSongsPlaySourceProgressive(
+  songs,
+  artistName,
+  {
+    concurrency = 6,
+    artistAliases = [],
+    readyCount = 4,
+    onSong = null,
+  } = {}
+) {
+  const list = Array.isArray(songs) ? songs : [];
+  const out = list.map((s) => ({ ...s, playSource: s.playSource || null }));
+  if (!list.length) {
+    return { songs: out, background: Promise.resolve(out) };
+  }
+
+  async function enrichIndex(idx) {
+    const resolved = await resolvePlaySource(list[idx], artistName, { artistAliases });
+    Object.assign(out[idx], {
+      playSource: resolved.playSource,
+      previewUrl: resolved.previewUrl || "",
+      itunesTrackId: resolved.itunesTrackId || "",
+      trackViewUrl: resolved.trackViewUrl || "",
+    });
+    onSong?.(out[idx], idx);
+    return out[idx];
+  }
+
+  async function runRange(start, end) {
+    let cursor = start;
+    const n = Math.max(0, end - start);
+    if (!n) return;
+    const workers = Math.min(Math.max(1, concurrency), n);
+    async function worker() {
+      while (cursor < end) {
+        const idx = cursor++;
+        await enrichIndex(idx);
+      }
+    }
+    await Promise.all(Array.from({ length: workers }, () => worker()));
+  }
+
+  const first = Math.min(Math.max(0, readyCount), list.length);
+  await runRange(0, first);
+
+  const background = runRange(first, list.length).then(() => out);
+  return { songs: out, background };
 }

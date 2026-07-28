@@ -1,4 +1,4 @@
--- D1 schema for anonymous cup rankings
+-- D1 schema for anonymous cup rankings (production + local)
 CREATE TABLE IF NOT EXISTS song_wins (
   song_id TEXT PRIMARY KEY,
   title TEXT NOT NULL,

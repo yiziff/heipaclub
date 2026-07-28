@@ -1,7 +1,7 @@
 /**
  * Auto-built Chinese rap roster: NetEase fans >= 20000.
  * Regenerate: npm run roster
- * Generated: 2026-07-27T12:34:05.939Z · 144 artists
+ * Generated: 2026-07-28T09:04:39.045Z · 188 artists
  */
 export const ARTISTS = [
   {
@@ -18,7 +18,7 @@ export const ARTISTS = [
   {
     "id": "马思唯",
     "name": "马思唯",
-    "search": "马思唯",
+    "search": "Masiwei",
     "city": "全国",
     "tag": "头部",
     "blurb": "网易云粉丝 4,342,198 · 热门 Top 50 可办赛。",
@@ -1587,6 +1587,490 @@ export const ARTISTS = [
     "neteaseArtistId": 34585909,
     "avatar": "https://p3.music.126.net/z_uyM3GZvjJj-lb8N0JTbw==/109951169641381061.jpg?param=400y400",
     "fans": 21796
+  },
+  {
+    "id": "drake",
+    "name": "Drake",
+    "search": "Drake",
+    "city": "欧美",
+    "tag": "欧美 Rap",
+    "blurb": "网易云粉丝 1,778,245 · 热门 Top 50 可办赛。",
+    "avatar": "https://p3.music.126.net/DOQGWJkQYBGxAQwZ2ia16g==/109951172373884264.jpg?param=400y400",
+    "fans": 1778245,
+    "neteaseArtistId": 53283
+  },
+  {
+    "id": "eminem",
+    "name": "Eminem",
+    "search": "Eminem",
+    "city": "欧美",
+    "tag": "欧美 Rap",
+    "blurb": "网易云粉丝 2,925,023 · 热门 Top 50 可办赛。",
+    "avatar": "https://p4.music.126.net/DjWNd_S_YrUngocq71p5Qw==/109951172373876815.jpg?param=400y400",
+    "fans": 2925023,
+    "neteaseArtistId": 32665
+  },
+  {
+    "id": "kendrick-lamar",
+    "name": "Kendrick Lamar",
+    "search": "Kendrick Lamar",
+    "city": "欧美",
+    "tag": "欧美 Rap",
+    "blurb": "网易云粉丝 1,075,737 · 热门 Top 50 可办赛。",
+    "avatar": "https://p4.music.126.net/fqjiTJullslLoc1KCKfhng==/109951170181174525.jpg?param=400y400",
+    "fans": 1075737,
+    "neteaseArtistId": 37995
+  },
+  {
+    "id": "j-cole",
+    "name": "J. Cole",
+    "search": "J. Cole",
+    "city": "欧美",
+    "tag": "欧美 Rap",
+    "blurb": "网易云粉丝 577,448 · 热门 Top 50 可办赛。",
+    "avatar": "https://p3.music.126.net/8dtAfrV0pgAZPa-GPdbiYA==/109951172702767411.jpg?param=400y400",
+    "fans": 577448,
+    "neteaseArtistId": 36910
+  },
+  {
+    "id": "kanye-west",
+    "name": "Kanye West",
+    "search": "Kanye West",
+    "city": "欧美",
+    "tag": "欧美 Rap",
+    "blurb": "网易云粉丝 1,132,609 · 热门 Top 50 可办赛。",
+    "avatar": "https://p3.music.126.net/o4e2hBeX1NgeF0wE0iaF6w==/109951169505053571.jpg?param=400y400",
+    "fans": 1132609,
+    "neteaseArtistId": 37520
+  },
+  {
+    "id": "travis-scott",
+    "name": "Travis Scott",
+    "search": "Travis Scott",
+    "city": "欧美",
+    "tag": "欧美 Rap",
+    "blurb": "网易云粉丝 1,331,939 · 热门 Top 50 可办赛。",
+    "avatar": "https://p4.music.126.net/Y6zySjJIh9So81NBJV9VjA==/109951169806255054.jpg?param=400y400",
+    "fans": 1331939,
+    "neteaseArtistId": 737012
+  },
+  {
+    "id": "jay-z",
+    "name": "Jay-Z",
+    "search": "Jay-Z",
+    "city": "欧美",
+    "tag": "欧美 Rap",
+    "blurb": "网易云粉丝 315,143 · 热门 Top 50 可办赛。",
+    "avatar": "https://p3.music.126.net/VqASXM0GoDH4xLB5t8oNHQ==/109951168599755827.jpg?param=400y400",
+    "fans": 315143,
+    "neteaseArtistId": 35334
+  },
+  {
+    "id": "future",
+    "name": "Future",
+    "search": "Future",
+    "city": "欧美",
+    "tag": "欧美 Rap",
+    "blurb": "网易云粉丝 433,169 · 热门 Top 50 可办赛。",
+    "avatar": "https://p4.music.126.net/dtDz50bOJfgENzOQo1kFlw==/109951167353594049.jpg?param=400y400",
+    "fans": 433169,
+    "neteaseArtistId": 33794
+  },
+  {
+    "id": "post-malone",
+    "name": "Post Malone",
+    "search": "Post Malone",
+    "city": "欧美",
+    "tag": "欧美 Rap",
+    "blurb": "网易云粉丝 945,147 · 热门 Top 50 可办赛。",
+    "avatar": "https://p3.music.126.net/AH1x9-8vm54CmjlHTwvlJA==/109951172337203562.jpg?param=400y400",
+    "fans": 945147,
+    "neteaseArtistId": 1057092
+  },
+  {
+    "id": "youngboy-never-broke-again",
+    "name": "YoungBoy Never Broke Again",
+    "search": "YoungBoy Never Broke Again",
+    "city": "欧美",
+    "tag": "欧美 Rap",
+    "blurb": "网易云粉丝 87,752 · 热门 Top 50 可办赛。",
+    "avatar": "https://p3.music.126.net/fw2UHy0ET3-zhJjg9RhC1A==/109951172024528788.jpg?param=400y400",
+    "fans": 87752,
+    "neteaseArtistId": 12370242
+  },
+  {
+    "id": "nicki-minaj",
+    "name": "Nicki Minaj",
+    "search": "Nicki Minaj",
+    "city": "欧美",
+    "tag": "欧美 Rap",
+    "blurb": "网易云粉丝 921,476 · 热门 Top 50 可办赛。",
+    "avatar": "https://p3.music.126.net/XIhzTIZ6sFXHjfVybUJNZQ==/109951172373852381.jpg?param=400y400",
+    "fans": 921476,
+    "neteaseArtistId": 70183
+  },
+  {
+    "id": "lil-wayne",
+    "name": "Lil Wayne",
+    "search": "Lil Wayne",
+    "city": "欧美",
+    "tag": "欧美 Rap",
+    "blurb": "网易云粉丝 369,085 · 热门 Top 50 可办赛。",
+    "avatar": "https://p4.music.126.net/F2rYo8LJlQN0LFcLue3VZA==/109951165693555172.jpg?param=400y400",
+    "fans": 369085,
+    "neteaseArtistId": 38118
+  },
+  {
+    "id": "tyler-the-creator",
+    "name": "Tyler, The Creator",
+    "search": "Tyler, The Creator",
+    "city": "欧美",
+    "tag": "欧美 Rap",
+    "blurb": "网易云粉丝 502,217 · 热门 Top 50 可办赛。",
+    "avatar": "https://p4.music.126.net/0_Wh6jHbRHeVoK7HXEPFIA==/109951171890680567.jpg?param=400y400",
+    "fans": 502217,
+    "neteaseArtistId": 44708
+  },
+  {
+    "id": "playboi-carti",
+    "name": "Playboi Carti",
+    "search": "Playboi Carti",
+    "city": "欧美",
+    "tag": "欧美 Rap",
+    "blurb": "网易云粉丝 338,774 · 热门 Top 50 可办赛。",
+    "avatar": "https://p3.music.126.net/7TiS9d0rp3Iv7qog46y5Hg==/109951171594185284.jpg?param=400y400",
+    "fans": 338774,
+    "neteaseArtistId": 12068095
+  },
+  {
+    "id": "don-toliver",
+    "name": "Don Toliver",
+    "search": "Don Toliver",
+    "city": "欧美",
+    "tag": "欧美 Rap",
+    "blurb": "网易云粉丝 146,883 · 热门 Top 50 可办赛。",
+    "avatar": "https://p3.music.126.net/t2LKqGJQpFkhem8xtIchxQ==/109951170123770275.jpg?param=400y400",
+    "fans": 146883,
+    "neteaseArtistId": 14253161
+  },
+  {
+    "id": "21-savage",
+    "name": "21 Savage",
+    "search": "21 Savage",
+    "city": "欧美",
+    "tag": "欧美 Rap",
+    "blurb": "网易云粉丝 739,573 · 热门 Top 50 可办赛。",
+    "avatar": "https://p4.music.126.net/kxbgeVr1vbV1-x76NsPCyA==/109951168930763833.jpg?param=400y400",
+    "fans": 739573,
+    "neteaseArtistId": 12062134
+  },
+  {
+    "id": "yeat",
+    "name": "Yeat",
+    "search": "Yeat",
+    "city": "欧美",
+    "tag": "欧美 Rap",
+    "blurb": "网易云粉丝 71,074 · 热门 Top 50 可办赛。",
+    "avatar": "https://p3.music.126.net/7iRNUQ4tcKo50TXo3qqo-w==/109951171594132429.jpg?param=400y400",
+    "fans": 71074,
+    "neteaseArtistId": 28690073
+  },
+  {
+    "id": "doja-cat",
+    "name": "Doja Cat",
+    "search": "Doja Cat",
+    "city": "欧美",
+    "tag": "欧美 Rap",
+    "blurb": "网易云粉丝 1,058,699 · 热门 Top 50 可办赛。",
+    "avatar": "https://p3.music.126.net/jZyB_qDms53cLG-KxhNRMw==/109951172625851247.jpg?param=400y400",
+    "fans": 1058699,
+    "neteaseArtistId": 911131
+  },
+  {
+    "id": "asap-rocky",
+    "name": "A$AP Rocky",
+    "search": "A$AP Rocky",
+    "city": "欧美",
+    "tag": "欧美 Rap",
+    "blurb": "网易云粉丝 377,322 · 热门 Top 50 可办赛。",
+    "avatar": "https://p3.music.126.net/I5cMh4nwooowGHB30NwUGA==/109951169914176672.jpg?param=400y400",
+    "fans": 377322,
+    "neteaseArtistId": 29100
+  },
+  {
+    "id": "lil-uzi-vert",
+    "name": "Lil Uzi Vert",
+    "search": "Lil Uzi Vert",
+    "city": "欧美",
+    "tag": "欧美 Rap",
+    "blurb": "网易云粉丝 562,863 · 热门 Top 50 可办赛。",
+    "avatar": "https://p3.music.126.net/wfvD-MfwtPvZsbSTahEEOA==/109951171989645220.jpg?param=400y400",
+    "fans": 562863,
+    "neteaseArtistId": 1180075
+  },
+  {
+    "id": "50-cent",
+    "name": "50 Cent",
+    "search": "50 Cent",
+    "city": "欧美",
+    "tag": "欧美 Rap",
+    "blurb": "网易云粉丝 208,744 · 热门 Top 50 可办赛。",
+    "avatar": "https://p3.music.126.net/VM_nVZFb3FmdTEvoXuJPsA==/109951165742073654.jpg?param=400y400",
+    "fans": 208744,
+    "neteaseArtistId": 46399
+  },
+  {
+    "id": "wiz-khalifa",
+    "name": "Wiz Khalifa",
+    "search": "Wiz Khalifa",
+    "city": "欧美",
+    "tag": "欧美 Rap",
+    "blurb": "网易云粉丝 382,467 · 热门 Top 50 可办赛。",
+    "avatar": "https://p4.music.126.net/owaYlaX9tSZ9A4GzGeo8jA==/109951172249878833.jpg?param=400y400",
+    "fans": 382467,
+    "neteaseArtistId": 46006
+  },
+  {
+    "id": "macklemore",
+    "name": "Macklemore",
+    "search": "Macklemore",
+    "city": "欧美",
+    "tag": "欧美 Rap",
+    "blurb": "网易云粉丝 64,840 · 热门 Top 50 可办赛。",
+    "avatar": "https://p4.music.126.net/EVRJdycixCBVcMjVEd349g==/109951167811227718.jpg?param=400y400",
+    "fans": 64840,
+    "neteaseArtistId": 40036
+  },
+  {
+    "id": "mac-miller",
+    "name": "Mac Miller",
+    "search": "Mac Miller",
+    "city": "欧美",
+    "tag": "欧美 Rap",
+    "blurb": "网易云粉丝 72,971 · 热门 Top 50 可办赛。",
+    "avatar": "https://p4.music.126.net/O1QRnvkKR6Pg6cciuthcKg==/109951165549512026.jpg?param=400y400",
+    "fans": 72971,
+    "neteaseArtistId": 39884
+  },
+  {
+    "id": "ty-dolla-sign",
+    "name": "Ty Dolla $ign",
+    "search": "Ty Dolla $ign",
+    "city": "欧美",
+    "tag": "欧美 Rap",
+    "blurb": "网易云粉丝 150,463 · 热门 Top 50 可办赛。",
+    "avatar": "https://p4.music.126.net/7L1OIoSwgUNBOEIsOkjXUQ==/109951171890681591.jpg?param=400y400",
+    "fans": 150463,
+    "neteaseArtistId": 789235
+  },
+  {
+    "id": "dave",
+    "name": "Dave",
+    "search": "Dave",
+    "city": "欧美",
+    "tag": "欧美 Rap",
+    "blurb": "网易云粉丝 209,150 · 热门 Top 50 可办赛。",
+    "avatar": "https://p3.music.126.net/NVsYjYB1f4-EwSeZFb3mQw==/109951169749611071.jpg?param=400y400",
+    "fans": 209150,
+    "neteaseArtistId": 47197216
+  },
+  {
+    "id": "gunna",
+    "name": "Gunna",
+    "search": "Gunna",
+    "city": "欧美",
+    "tag": "欧美 Rap",
+    "blurb": "网易云粉丝 205,509 · 热门 Top 50 可办赛。",
+    "avatar": "https://p4.music.126.net/XODel_jxeXn6_9-3ukUCuw==/109951170951775364.jpg?param=400y400",
+    "fans": 205509,
+    "neteaseArtistId": 12417065
+  },
+  {
+    "id": "cardi-b",
+    "name": "Cardi B",
+    "search": "Cardi B",
+    "city": "欧美",
+    "tag": "欧美 Rap",
+    "blurb": "网易云粉丝 811,301 · 热门 Top 50 可办赛。",
+    "avatar": "https://p3.music.126.net/fydwFZj3h4Z_7u7YU73Ayg==/109951171353029614.jpg?param=400y400",
+    "fans": 811301,
+    "neteaseArtistId": 12504253
+  },
+  {
+    "id": "snoop-dogg",
+    "name": "Snoop Dogg",
+    "search": "Snoop Dogg",
+    "city": "欧美",
+    "tag": "欧美 Rap",
+    "blurb": "网易云粉丝 426,670 · 热门 Top 50 可办赛。",
+    "avatar": "https://p3.music.126.net/Xo-HhSZ9jWF864H5wEW6RA==/109951165693551301.jpg?param=400y400",
+    "fans": 426670,
+    "neteaseArtistId": 42939
+  },
+  {
+    "id": "xxxtentacion",
+    "name": "XXXTENTACION",
+    "search": "XXXTENTACION",
+    "city": "欧美",
+    "tag": "欧美 Rap",
+    "blurb": "网易云粉丝 4,041,300 · 热门 Top 50 可办赛。",
+    "avatar": "https://p3.music.126.net/jLv2uXKaHr1DL7aD-EtEQQ==/109951169172609505.jpg?param=400y400",
+    "fans": 4041300,
+    "neteaseArtistId": 12107961
+  },
+  {
+    "id": "childish-gambino",
+    "name": "Childish Gambino",
+    "search": "Childish Gambino",
+    "city": "欧美",
+    "tag": "欧美 Rap",
+    "blurb": "网易云粉丝 168,961 · 热门 Top 50 可办赛。",
+    "avatar": "https://p3.music.126.net/zU7GVDvPr7Q_cGaAE0-Vlg==/109951163072728636.jpg?param=400y400",
+    "fans": 168961,
+    "neteaseArtistId": 30929
+  },
+  {
+    "id": "dababy",
+    "name": "DaBaby",
+    "search": "DaBaby",
+    "city": "欧美",
+    "tag": "欧美 Rap",
+    "blurb": "网易云粉丝 138,323 · 热门 Top 50 可办赛。",
+    "avatar": "https://p3.music.126.net/Q4KIqL09RgewtlwIsHH9qA==/109951167914347980.jpg?param=400y400",
+    "fans": 138323,
+    "neteaseArtistId": 14629637
+  },
+  {
+    "id": "lil-baby",
+    "name": "Lil Baby",
+    "search": "Lil Baby",
+    "city": "欧美",
+    "tag": "欧美 Rap",
+    "blurb": "网易云粉丝 270,035 · 热门 Top 50 可办赛。",
+    "avatar": "https://p4.music.126.net/wgDlK__1GoGVhfTPzhsbww==/109951167965059640.jpg?param=400y400",
+    "fans": 270035,
+    "neteaseArtistId": 12505561
+  },
+  {
+    "id": "juice-wrld",
+    "name": "Juice WRLD",
+    "search": "Juice WRLD",
+    "city": "欧美",
+    "tag": "欧美 Rap",
+    "blurb": "网易云粉丝 833,842 · 热门 Top 50 可办赛。",
+    "avatar": "https://p3.music.126.net/U02Y9eY_vp9IHEWnxDMEMw==/109951165792031173.jpg?param=400y400",
+    "fans": 833842,
+    "neteaseArtistId": 13581233
+  },
+  {
+    "id": "young-thug",
+    "name": "Young Thug",
+    "search": "Young Thug",
+    "city": "欧美",
+    "tag": "欧美 Rap",
+    "blurb": "网易云粉丝 261,136 · 热门 Top 50 可办赛。",
+    "avatar": "https://p4.music.126.net/m6zJOhWcZPXcXZcVKkxGsw==/109951168715699562.jpg?param=400y400",
+    "fans": 261136,
+    "neteaseArtistId": 287014
+  },
+  {
+    "id": "2pac",
+    "name": "2Pac",
+    "search": "2Pac",
+    "city": "欧美",
+    "tag": "欧美 Rap",
+    "blurb": "网易云粉丝 596,469 · 热门 Top 50 可办赛。",
+    "avatar": "https://p3.music.126.net/iKFLjOU1VqELzsNuB2t7yg==/109951168930774652.jpg?param=400y400",
+    "fans": 596469,
+    "neteaseArtistId": 129270
+  },
+  {
+    "id": "g-eazy",
+    "name": "G-Eazy",
+    "search": "G-Eazy",
+    "city": "欧美",
+    "tag": "欧美 Rap",
+    "blurb": "网易云粉丝 163,750 · 热门 Top 50 可办赛。",
+    "avatar": "https://p4.music.126.net/x-pQaakCxJb-4qsTQy9ZdA==/109951169703703295.jpg?param=400y400",
+    "fans": 163750,
+    "neteaseArtistId": 820036
+  },
+  {
+    "id": "kid-cudi",
+    "name": "Kid Cudi",
+    "search": "Kid Cudi",
+    "city": "欧美",
+    "tag": "欧美 Rap",
+    "blurb": "网易云粉丝 46,136 · 热门 Top 50 可办赛。",
+    "avatar": "https://p4.music.126.net/pM4mmpBD3mSzpzD8Wy2Hgw==/109951165956633050.jpg?param=400y400",
+    "fans": 46136,
+    "neteaseArtistId": 37535
+  },
+  {
+    "id": "central-cee",
+    "name": "Central Cee",
+    "search": "Central Cee",
+    "city": "欧美",
+    "tag": "欧美 Rap",
+    "blurb": "网易云粉丝 437,761 · 热门 Top 50 可办赛。",
+    "avatar": "https://p3.music.126.net/HnREivLj4VPILuSmohBJAQ==/109951170239467027.jpg?param=400y400",
+    "fans": 437761,
+    "neteaseArtistId": 31996349
+  },
+  {
+    "id": "jack-harlow",
+    "name": "Jack Harlow",
+    "search": "Jack Harlow",
+    "city": "欧美",
+    "tag": "欧美 Rap",
+    "blurb": "网易云粉丝 94,576 · 热门 Top 50 可办赛。",
+    "avatar": "https://p3.music.126.net/4zFffTZx6JYD0yymjhelyQ==/109951168572751829.jpg?param=400y400",
+    "fans": 94576,
+    "neteaseArtistId": 13088051
+  },
+  {
+    "id": "nas",
+    "name": "Nas",
+    "search": "Nas",
+    "city": "欧美",
+    "tag": "欧美 Rap",
+    "blurb": "网易云粉丝 180,850 · 热门 Top 50 可办赛。",
+    "avatar": "https://p4.music.126.net/CEytlTs8ywFlVR6CGocj-A==/109951168733350411.jpg?param=400y400",
+    "fans": 180850,
+    "neteaseArtistId": 40424
+  },
+  {
+    "id": "dr-dre",
+    "name": "Dr. Dre",
+    "search": "Dr. Dre",
+    "city": "欧美",
+    "tag": "欧美 Rap",
+    "blurb": "网易云粉丝 300,075 · 热门 Top 50 可办赛。",
+    "avatar": "https://p4.music.126.net/6j1HMGWNrIfX_lRY5eIWEA==/109951165674351299.jpg?param=400y400",
+    "fans": 300075,
+    "neteaseArtistId": 53243
+  },
+  {
+    "id": "pusha-t",
+    "name": "Pusha T",
+    "search": "Pusha T",
+    "city": "欧美",
+    "tag": "欧美 Rap",
+    "blurb": "网易云粉丝 43,548 · 热门 Top 50 可办赛。",
+    "avatar": "https://p4.music.126.net/XxziOZ6VoxPweXJyh8aiKQ==/109951167855621045.jpg?param=400y400",
+    "fans": 43548,
+    "neteaseArtistId": 41675
+  },
+  {
+    "id": "ice-cube",
+    "name": "Ice Cube",
+    "search": "Ice Cube",
+    "city": "欧美",
+    "tag": "欧美 Rap",
+    "blurb": "网易云粉丝 126,220 · 热门 Top 50 可办赛。",
+    "avatar": "https://p3.music.126.net/HH2NKUUuq_fhPxtqkAoyrA==/109951165693711589.jpg?param=400y400",
+    "fans": 126220,
+    "neteaseArtistId": 35051
   }
 ];
 

@@ -2,10 +2,21 @@
   "$schema": "node_modules/wrangler/config-schema.json",
   "name": "heipaclub",
   "compatibility_date": "2026-07-27",
+  "main": "./cf-api/index.js",
   "observability": {
     "enabled": true
   },
   "assets": {
-    "not_found_handling": "single-page-application"
-  }
+    "not_found_handling": "single-page-application",
+    "run_worker_first": ["/api/rank/*", "/api/netease/*"]
+  },
+  "d1_databases": [
+    {
+      "binding": "DB",
+      "database_name": "heipaclub-rank",
+      "database_id": "fcff2d6e-b8b5-4ab5-b2ff-7ba4ab20daef"
+    }
+  ],
+  // Local: copy .dev.vars.example → .dev.vars
+  // Production: npx wrangler secret put NETEASE_API_ORIGIN
 }
