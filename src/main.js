@@ -3,6 +3,7 @@ import {
   ARTISTS,
   getArtist,
 } from "./data/artists.js";
+import { HIPHOP_LABELS, artistsInLabel, getLabel } from "./data/labels.js";
 import { coverUrl, imgTag } from "./artwork.js";
 import {
   drawHangLaField,
@@ -135,8 +136,8 @@ function shell(inner, { back, actions = "", wide = false, underBrand = "" } = {}
     <div class="shell ${wide ? "shell-wide" : ""}">
       <header class="topbar">
         <div class="topbar-brand-col">
-          <a class="brand" href="#/" aria-label="真黑怕巅峰对决首页">
-            <div class="brand-mark">真黑怕<span>巅峰对决</span></div>
+          <a class="brand" href="#/" aria-label="黑怕巅峰对决首页">
+            <div class="brand-mark"><span class="bm-a">黑怕</span><span class="bm-b">巅峰对决</span></div>
           </a>
           ${underBrand}
         </div>
@@ -229,8 +230,14 @@ async function hydrateArtist(id) {
 function renderHome() {
   /** @type {"fans" | "alpha" | "rank"} */
   let sortMode = "fans";
-  /** @type {"all" | "cn" | "west"} */
-  let regionMode = "all";
+  /** @type {"cn" | "west" | "label"} */
+  let regionMode = "cn";
+  /** @type {string | null} */
+  let labelId = null;
+  let labelPanelOpen = false;
+  /** Homepage list size (cn/west, no search). */
+  let homeLimit = 50;
+  let homeShowAll = false;
   /** neteaseArtistId or name → wins */
   const rankWins = new Map();
 
@@ -247,25 +254,38 @@ function renderHome() {
     return "cn";
   };
 
-  const defaultHomeList = [...ARTISTS]
-    .sort((a, b) => Number(b.fans || 0) - Number(a.fans || 0))
-    .slice(0, 50);
+  const topByFans = (list, n = Infinity) => {
+    const sorted = [...list].sort((a, b) => Number(b.fans || 0) - Number(a.fans || 0));
+    if (!Number.isFinite(n) || n >= sorted.length) return sorted;
+    return sorted.slice(0, n);
+  };
+
+  const basePool = () => {
+    if (regionMode === "label" && labelId) {
+      return artistsInLabel(ARTISTS, labelId);
+    }
+    return ARTISTS.filter((a) => artistRegion(a) === regionMode);
+  };
 
   const filteredLocalList = (q = "") => {
     const query = q.trim().toLowerCase();
-    const pool = query
-      ? ARTISTS
-      : regionMode === "all"
-        ? defaultHomeList
-        : ARTISTS;
-    const regioned = pool.filter((a) => regionMode === "all" || artistRegion(a) === regionMode);
-    if (!query) return [...regioned];
-    return regioned.filter((a) =>
-      [a.name, a.search, a.city, a.tag, a.blurb]
-        .join(" ")
-        .toLowerCase()
-        .includes(query)
-    );
+    const regioned = basePool();
+    if (query || regionMode === "label") {
+      if (!query) return [...regioned];
+      return regioned.filter((a) =>
+        [a.name, a.search, a.city, a.tag, a.blurb]
+          .join(" ")
+          .toLowerCase()
+          .includes(query)
+      );
+    }
+    const limit = homeShowAll ? Infinity : homeLimit;
+    return topByFans(regioned, limit);
+  };
+
+  const resetHomePaging = () => {
+    homeLimit = 50;
+    homeShowAll = false;
   };
 
   const artistRankKey = (a) => String(a.neteaseArtistId || a.id || a.name || "");
@@ -338,25 +358,108 @@ function renderHome() {
     }
   };
 
+  const paintLabelPanel = () => {
+    const panel = document.getElementById("label-panel");
+    if (!panel) return;
+    if (!labelPanelOpen) {
+      panel.hidden = true;
+      panel.innerHTML = "";
+      return;
+    }
+    panel.hidden = false;
+    panel.innerHTML = `
+      <div class="label-panel-head">选择厂牌</div>
+      <div class="label-chip-row">
+        ${HIPHOP_LABELS.map((l) => {
+          const n = artistsInLabel(ARTISTS, l.id).length;
+          const city = l.city ? ` · ${esc(l.city)}` : "";
+          return `
+            <button type="button" class="label-chip${labelId === l.id ? " active" : ""}" data-label="${esc(l.id)}">
+              <strong>${esc(l.name)}</strong>
+              <span>${n} 人${city}</span>
+            </button>`;
+        }).join("")}
+      </div>
+    `;
+    panel.querySelectorAll("[data-label]").forEach((btn) => {
+      btn.addEventListener("click", () => {
+        labelId = btn.dataset.label || null;
+        regionMode = "label";
+        labelPanelOpen = true;
+        syncRegionChips();
+        paintLabelPanel();
+        apply();
+      });
+    });
+  };
+
+  const syncRegionChips = () => {
+    document.querySelectorAll("#region-row [data-region]").forEach((c) => {
+      const r = c.dataset.region;
+      const on =
+        r === "label" ? regionMode === "label" : regionMode === r && regionMode !== "label";
+      c.classList.toggle("active", on);
+    });
+  };
+
   let searchToken = 0;
+  const paintMoreBar = (shown, poolTotal, query) => {
+    const bar = document.getElementById("home-more");
+    if (!bar) return;
+    const paging =
+      !query && regionMode !== "label" && !homeShowAll && shown < poolTotal;
+    if (!paging) {
+      bar.hidden = true;
+      bar.innerHTML = "";
+      return;
+    }
+    bar.hidden = false;
+    const remain = poolTotal - shown;
+    bar.innerHTML = `
+      <button type="button" class="ghost-btn home-more-btn" id="home-more-btn">
+        显示更多（再 ${Math.min(50, remain)} 位）
+      </button>
+      ${
+        homeLimit > 50
+          ? `<button type="button" class="primary-btn home-all-btn" id="home-all-btn">显示全部（${poolTotal}）</button>`
+          : ""
+      }
+    `;
+    document.getElementById("home-more-btn")?.addEventListener("click", () => {
+      homeLimit += 50;
+      paintGrid(input?.value || "");
+    });
+    document.getElementById("home-all-btn")?.addEventListener("click", () => {
+      homeShowAll = true;
+      paintGrid(input?.value || "");
+    });
+  };
+
   const paintGrid = async (q = "") => {
     const token = ++searchToken;
+    const query = String(q || "").trim();
+    const poolTotal =
+      regionMode === "label" || query ? 0 : basePool().length;
     const localList = sortList(filteredLocalList(q));
     let list = localList;
     const grid = document.getElementById("artist-grid");
     const count = document.getElementById("artist-count");
     if (!grid) return;
-    const query = String(q || "").trim();
-    if (query) {
+    if (query && regionMode !== "label") {
       grid.innerHTML = `<p class="loading-line">正在搜索 iTunes 歌手…</p>`;
       list = sortList(await mergeWithItunes(query, localList));
-      list = list.filter((a) => regionMode === "all" || artistRegion(a) === regionMode);
+      list = list.filter((a) => artistRegion(a) === regionMode);
       if (token !== searchToken) return;
     }
+    const labelMeta = regionMode === "label" && labelId ? getLabel(labelId) : null;
     if (count) {
-      count.textContent = query
-        ? `${list.length} 位匹配（本地 + iTunes）`
-        : `${list.length} / ${ARTISTS.length} 位 Rapper（首页展示）`;
+      if (query && regionMode !== "label") {
+        count.textContent = `${list.length} 位匹配（本地 + iTunes）`;
+      } else if (labelMeta) {
+        count.textContent = `${labelMeta.name}${labelMeta.city ? ` · ${labelMeta.city}` : ""} · ${list.length} 位成员（名单内）`;
+      } else {
+        count.textContent = `${list.length} / ${poolTotal || ARTISTS.length} 位 Rapper（首页展示）`;
+      }
     }
     grid.innerHTML = list.length
       ? list
@@ -372,31 +475,40 @@ function renderHome() {
           <div class="artist-card-body">
             <div class="name">${esc(a.name)}</div>
             <p class="meta">${
-                  a.fans
-                    ? `${Number(a.fans).toLocaleString("zh-CN")} 粉`
-                    : a.source === "itunes"
-                      ? "iTunes"
-                      : `热门 ${TOP_N}`
+              a.fans
+                ? `${Number(a.fans).toLocaleString("zh-CN")} 粉`
+                : a.source === "itunes"
+                  ? "iTunes"
+                  : `热门 ${TOP_N}`
             }${winMeta}</p>
           </div>
         </button>`;
           })
           .join("")
-      : `<p class="loading-line">没有匹配的 Rapper，换个关键词试试。</p>`;
+      : `<p class="loading-line">${
+          regionMode === "label"
+            ? "该厂牌成员暂未匹配到名单，或尚未收录。"
+            : "没有匹配的 Rapper，换个关键词试试。"
+        }</p>`;
 
     grid.querySelectorAll("[data-artist]").forEach((btn) => {
       btn.addEventListener("click", () => navigate(`/artist/${btn.dataset.artist}`));
     });
 
-    // Hydrate visible cards first to reduce blank avatars / late popping.
     list.slice(0, 24).forEach((a) => {
       if (!a.avatar) fillAvatarForArtist(a);
     });
+
+    paintMoreBar(list.length, poolTotal, query);
   };
 
   app.innerHTML = shell(`
     <section class="hero">
-      <h1>真黑怕<br /><em>巅峰对决</em></h1>
+      <div class="hero-title-glow">
+        <span class="hero-glow-ring" aria-hidden="true"></span>
+        <span class="hero-glow-ring hero-glow-ring-2" aria-hidden="true"></span>
+        <h1>黑怕<br /><em>巅峰对决</em></h1>
+      </div>
     </section>
     <div class="section-title">选择歌手 <span id="artist-count">50 / ${ARTISTS.length} 位 Rapper（首页展示）</span></div>
     <div class="search-row search-row-with-hangla">
@@ -405,10 +517,11 @@ function renderHome() {
     </div>
     <div class="filter-row sort-row" id="region-row" role="group" aria-label="地区筛选">
       <span class="sort-label">范围</span>
-      <button type="button" class="mode-chip active" data-region="all">全部</button>
-      <button type="button" class="mode-chip" data-region="cn">中文</button>
+      <button type="button" class="mode-chip active" data-region="cn">中文</button>
       <button type="button" class="mode-chip" data-region="west">欧美</button>
+      <button type="button" class="mode-chip" data-region="label" id="label-entry">HipHop厂牌</button>
     </div>
+    <div class="label-panel" id="label-panel" hidden></div>
     <div class="filter-row sort-row" id="sort-row" role="group" aria-label="排序方式">
       <span class="sort-label">排序</span>
       <button type="button" class="mode-chip active" data-sort="fans">粉丝量</button>
@@ -416,13 +529,14 @@ function renderHome() {
       <button type="button" class="mode-chip" data-sort="rank">本站夺冠次数</button>
     </div>
     <div class="artist-grid" id="artist-grid"></div>
+    <div class="home-more" id="home-more" hidden></div>
   `);
 
+  const input = document.getElementById("artist-search");
   paintGrid("");
 
   document.getElementById("hangla-entry")?.addEventListener("click", () => navigate("/hangla"));
 
-  const input = document.getElementById("artist-search");
   let timer = null;
   const apply = () => {
     clearTimeout(timer);
@@ -430,7 +544,10 @@ function renderHome() {
       paintGrid(input?.value || "");
     }, 180);
   };
-  input?.addEventListener("input", apply);
+  input?.addEventListener("input", () => {
+    // searching: no need to reset paging permanently; empty search keeps limit
+    apply();
+  });
 
   document.querySelectorAll("#sort-row [data-sort]").forEach((chip) => {
     chip.addEventListener("click", () => {
@@ -441,12 +558,27 @@ function renderHome() {
       apply();
     });
   });
+
   document.querySelectorAll("#region-row [data-region]").forEach((chip) => {
     chip.addEventListener("click", () => {
-      regionMode = chip.dataset.region || "all";
-      document
-        .querySelectorAll("#region-row .mode-chip")
-        .forEach((c) => c.classList.toggle("active", c === chip));
+      const r = chip.dataset.region;
+      if (r === "label") {
+        labelPanelOpen = !labelPanelOpen || regionMode !== "label";
+        if (regionMode !== "label") {
+          regionMode = "label";
+          if (!labelId) labelId = HIPHOP_LABELS[0]?.id || null;
+        }
+        syncRegionChips();
+        paintLabelPanel();
+        if (labelId) apply();
+        return;
+      }
+      regionMode = r === "west" ? "west" : "cn";
+      labelId = null;
+      labelPanelOpen = false;
+      resetHomePaging();
+      syncRegionChips();
+      paintLabelPanel();
       apply();
     });
   });
@@ -680,7 +812,7 @@ function renderHangLa() {
       );
       bindBack();
       document.getElementById("hangla-copy")?.addEventListener("click", async () => {
-        const text = [`真黑怕 · 从夯到拉 · ${modeLabel()}（${regionLabel()} / ${fanLabel()}）`, ...lines].join("\n");
+        const text = [`黑怕 · 从夯到拉 · ${modeLabel()}（${regionLabel()} / ${fanLabel()}）`, ...lines].join("\n");
         try {
           await navigator.clipboard.writeText(text);
           showToast("已复制到剪贴板");
@@ -1594,7 +1726,7 @@ function showRoundSplash({ title, sub }, onDone) {
   el.innerHTML = `
     <div class="round-splash-bg" aria-hidden="true"></div>
     <div class="round-splash-card">
-      <div class="round-splash-badge">真黑怕巅峰对决</div>
+      <div class="round-splash-badge">黑怕巅峰对决</div>
       <h2 class="round-splash-title">${esc(title)}</h2>
       <p class="round-splash-sub">${esc(sub)}</p>
     </div>
@@ -1662,7 +1794,7 @@ function openShareBracket(state) {
         </div>
       </header>
       <div class="share-bracket-stage" id="share-bracket-capture">
-        <div class="share-bracket-brand">真黑怕巅峰对决</div>
+        <div class="share-bracket-brand">黑怕巅峰对决</div>
         ${renderBracketHtml(state.bracket, avatar)}
         <div class="share-bracket-qr">
           <canvas id="share-qr-canvas" width="132" height="132" aria-label="网站二维码"></canvas>
@@ -1753,7 +1885,7 @@ async function downloadShareCard(state) {
 
   ctx.fillStyle = "#111110";
   ctx.font = "600 28px Noto Sans SC, sans-serif";
-  ctx.fillText("真黑怕巅峰对决", 64, 78);
+  ctx.fillText("黑怕巅峰对决", 64, 78);
   ctx.font = "400 30px Noto Sans SC, sans-serif";
   ctx.fillStyle = "#5c5a55";
   ctx.fillText(`${state.artistName} · 冠军诞生`, 64, 122);
@@ -1804,7 +1936,7 @@ async function downloadShareCard(state) {
   ctx.font = "400 24px Noto Sans SC, sans-serif";
   ctx.fillText("heipaclub.com", qrX + qrSize + 32, qrY + 94);
   ctx.font = "400 20px Noto Sans SC, sans-serif";
-  ctx.fillText("微信扫一扫 · 真黑怕巅峰对决", qrX + qrSize + 32, qrY + 130);
+  ctx.fillText("微信扫一扫 · 黑怕巅峰对决", qrX + qrSize + 32, qrY + 130);
 
   ctx.fillStyle = "#5c5a55";
   ctx.font = "400 20px Noto Sans SC, sans-serif";
@@ -2020,7 +2152,7 @@ function renderChamp(state) {
       <div class="champ-cup-stage">
         <p class="champ-cup-artist"><span class="rapper-name">${esc(state.artistName)}</span></p>
         <p class="champ-cup-born">冠军诞生</p>
-        <p class="champ-cup-brand">真黑怕巅峰对决</p>
+        <p class="champ-cup-brand">黑怕巅峰对决</p>
         <p class="champ-cup-champion-word">C H A M P I O N</p>
         <div class="champ-cup-cover-wrap">
           ${imgTag(coverUrl(c, avatar), { alt: c.title, className: "champ-cup-cover" })}

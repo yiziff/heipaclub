@@ -1,4 +1,4 @@
-﻿# 真说唱巅峰对决
+﻿# 黑怕巅峰对决
 
 中文说唱 1v1 淘汰赛：按歌手办赛，用网易云热门 Top 50 选出本命曲。  
 灵感来自 [MUSIC CUP](https://musiccup.app/?lang=hans)。

@@ -10,6 +10,7 @@
   --danger: #ff3b1f;
   --shadow: 0 18px 50px rgba(17, 17, 16, 0.12);
   --display: "Bebas Neue", "Noto Sans SC", sans-serif;
+  --brand-display: "ZCOOL QingKe HuangYou", "Noto Sans SC", sans-serif;
   --sans: "Noto Sans SC", system-ui, sans-serif;
   --radius: 4px;
 }
@@ -1001,17 +1002,28 @@ a.ghost-btn {
 }
 
 .brand-mark {
-  font-family: var(--display);
-  font-size: clamp(1.55rem, 3.6vw, 2.1rem);
-  letter-spacing: 0.06em;
-  line-height: 0.95;
+  display: inline-flex;
+  align-items: baseline;
+  flex-wrap: wrap;
+  gap: 0.18em;
+  font-family: var(--brand-display);
+  font-size: clamp(1.45rem, 3.2vw, 1.95rem);
+  letter-spacing: 0.04em;
+  line-height: 1;
+  font-weight: 400;
+  font-style: italic;
+  transform: skewX(-8deg);
 }
 
-.brand-mark span {
-  display: inline;
-  margin-left: 0.12em;
-  color: transparent;
-  -webkit-text-stroke: 1.4px var(--ink);
+.brand-mark .bm-a,
+.brand-mark .bm-b {
+  color: var(--ink);
+}
+
+.brand-mark .bm-b {
+  background: var(--accent);
+  padding: 0.06em 0.14em 0.02em;
+  box-decoration-break: clone;
 }
 
 .brand-sub {
@@ -1044,8 +1056,44 @@ a.ghost-btn {
   animation: rise 0.7s ease both;
 }
 
+.hero-title-glow {
+  position: relative;
+  display: inline-block;
+  padding: 0.45rem 0.7rem;
+  isolation: isolate;
+}
+
+.hero-title-glow::before {
+  content: "";
+  position: absolute;
+  inset: 12% 2%;
+  z-index: -1;
+  border-radius: 1.1rem;
+  background: rgba(184, 255, 26, 0.22);
+  box-shadow:
+    0 0 0 0 rgba(184, 255, 26, 0.45),
+    0 10px 36px rgba(184, 255, 26, 0.28);
+  animation: hero-glow-pulse 1.8s ease-in-out infinite;
+  pointer-events: none;
+}
+
+.hero-glow-ring {
+  position: absolute;
+  inset: -6px -10px;
+  border-radius: 1.35rem;
+  border: 2px solid rgba(184, 255, 26, 0.7);
+  pointer-events: none;
+  z-index: -1;
+  animation: hero-glow-ring 1.8s ease-out infinite;
+}
+
+.hero-glow-ring-2 {
+  animation-delay: 0.9s;
+}
+
 .hero h1 {
   margin: 0;
+  position: relative;
   font-family: var(--display);
   font-size: clamp(2.8rem, 9vw, 5.4rem);
   line-height: 0.88;
@@ -1059,6 +1107,44 @@ a.ghost-btn {
   background: var(--accent);
   padding: 0 0.12em;
   box-decoration-break: clone;
+}
+
+@keyframes hero-glow-pulse {
+  0%,
+  100% {
+    box-shadow:
+      0 0 0 0 rgba(184, 255, 26, 0.5),
+      0 10px 36px rgba(184, 255, 26, 0.25);
+    opacity: 0.85;
+  }
+  50% {
+    box-shadow:
+      0 0 0 10px rgba(184, 255, 26, 0),
+      0 14px 42px rgba(184, 255, 26, 0.4);
+    opacity: 1;
+  }
+}
+
+@keyframes hero-glow-ring {
+  0% {
+    transform: scale(0.94);
+    opacity: 0.8;
+  }
+  100% {
+    transform: scale(1.22);
+    opacity: 0;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .hero-title-glow::before,
+  .hero-glow-ring {
+    animation: none;
+  }
+  .hero-glow-ring {
+    opacity: 0.35;
+    transform: scale(1.06);
+  }
 }
 
 .hero p {
@@ -1175,10 +1261,88 @@ a.ghost-btn {
   letter-spacing: 0.06em;
 }
 
+.label-panel {
+  margin: -0.35rem 0 1rem;
+  padding: 0.85rem 0.95rem;
+  border: 1px solid var(--line);
+  border-radius: 14px;
+  background: rgba(255, 255, 255, 0.55);
+  backdrop-filter: blur(10px);
+  animation: rise 0.35s ease both;
+}
+
+.label-panel-head {
+  font-size: 0.82rem;
+  color: var(--muted);
+  letter-spacing: 0.08em;
+  margin-bottom: 0.55rem;
+}
+
+.label-chip-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.5rem;
+}
+
+.label-chip {
+  display: inline-flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 0.12rem;
+  border: 1px solid var(--line);
+  background: rgba(255, 255, 255, 0.55);
+  padding: 0.55rem 0.85rem;
+  border-radius: 12px;
+  text-align: left;
+  min-width: 7.5rem;
+  transition: transform 0.15s ease, border-color 0.15s ease, background 0.15s ease;
+}
+
+.label-chip strong {
+  font-size: 0.95rem;
+  letter-spacing: 0.02em;
+}
+
+.label-chip span {
+  font-size: 0.75rem;
+  color: var(--muted);
+}
+
+.label-chip:hover {
+  transform: translateY(-1px);
+  border-color: rgba(17, 17, 16, 0.35);
+}
+
+.label-chip.active {
+  background: var(--accent);
+  border-color: transparent;
+}
+
+.label-chip.active span {
+  color: rgba(17, 17, 16, 0.7);
+}
+
 .artist-grid {
   display: grid;
   grid-template-columns: repeat(auto-fill, minmax(240px, 1fr));
   gap: 0.85rem;
+}
+
+.home-more {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: center;
+  gap: 0.75rem;
+  margin: 1.35rem 0 0.5rem;
+}
+
+.home-more[hidden] {
+  display: none;
+}
+
+.home-more-btn,
+.home-all-btn {
+  min-width: 10rem;
 }
 
 .artist-card {

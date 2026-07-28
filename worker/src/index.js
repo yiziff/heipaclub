@@ -1,5 +1,5 @@
 /**
- * Cloudflare Worker — anonymous rank API for 真说唱巅峰对决
+ * Cloudflare Worker — anonymous rank API for 黑怕巅峰对决
  *
  * Routes (also served under site /api/rank/* via route config):
  *   GET  /api/rank/songs?limit=150&q=
