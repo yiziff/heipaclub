@@ -3,11 +3,47 @@
  * Keep in sync: scripts/build-itunes-map.mjs imports these for offline indexing.
  */
 
+/** Best-effort TW/HK traditional → simplified for title compare. */
+const TRAD_SIMP = {
+  軍: "军",
+  國: "国",
+  愛: "爱",
+  臺: "台",
+  灣: "湾",
+  麼: "么",
+  後: "后",
+  發: "发",
+  時: "时",
+  長: "长",
+  東: "东",
+  車: "车",
+  馬: "马",
+  風: "风",
+  電: "电",
+  樂: "乐",
+  們: "们",
+  這: "这",
+  還: "还",
+  來: "来",
+  對: "对",
+  開: "开",
+  關: "关",
+  與: "与",
+  為: "为",
+  會: "会",
+  說: "说",
+  語: "语",
+  質: "质",
+  實: "实",
+  現: "现",
+  萬: "万",
+  億: "亿",
+};
+
 export function norm(s) {
-  return String(s || "")
-    .toLowerCase()
-    .replace(/\s+/g, "")
-    .replace(/[·．._\-#（）()]/g, "");
+  let out = String(s || "").toLowerCase();
+  out = out.replace(/[軍國愛臺灣麼後發時長東車馬風電樂們這還來對開關與為會說語質實現萬億]/g, (ch) => TRAD_SIMP[ch] || ch);
+  return out.replace(/\s+/g, "").replace(/[·．._\-#（）()']/g, "");
 }
 
 /** Strip feat./parens noise before title compare. */
