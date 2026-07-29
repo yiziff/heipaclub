@@ -232,11 +232,7 @@ async function lookupSongs(artistId, country, limit = 80) {
 }
 
 async function loadArtistCatalog(artist, aliases) {
-  const queries = [
-    artist.name,
-    artist.search,
-    ...aliases,
-  ].filter(Boolean);
+  const queries = [artist.name, artist.search, ...aliases].filter(Boolean);
   const seenQ = new Set();
   const uniq = [];
   for (const q of queries) {
@@ -247,33 +243,33 @@ async function loadArtistCatalog(artist, aliases) {
   }
 
   let bestCand = null;
-  for (const q of uniq.slice(0, 4)) {
-    const hits = await searchItunesArtist(q, { limit: 4 });
+  // One storefront first; only widen if needed
+  for (const q of uniq.slice(0, 2)) {
+    const hits = await searchItunesArtist(q, { limit: 3, countries: ["cn", "us"] });
     const top = hits[0];
     if (top && (!bestCand || top.score > bestCand.score)) bestCand = top;
     if (bestCand && bestCand.score >= 80) break;
-    await sleep(80);
   }
   if (!bestCand) return { itunesArtistId: "", tracks: [] };
 
   const byId = new Map();
-  for (const country of COUNTRIES) {
+  for (const country of ["cn", "us", "hk"]) {
     try {
-      const tracks = await lookupSongs(bestCand.id, country, 100);
+      const tracks = await lookupSongs(bestCand.id, country, 120);
       for (const t of tracks) {
         if (!t?.trackId || !t.previewUrl) continue;
         const id = String(t.trackId);
         if (!byId.has(id)) byId.set(id, t);
       }
+      if (byId.size >= 40) break;
     } catch {
       /* skip country */
     }
-    await sleep(60);
   }
   return { itunesArtistId: String(bestCand.id), tracks: [...byId.values()] };
 }
 
-async function resolveSongOffline(song, artistName, aliases, catalog) {
+async function resolveSongOffline(song, artistName, aliases, catalog, { allowSearch = true } = {}) {
   const title = String(song?.title || "").trim();
   if (!title) return playSourcePatchFromTrack(null);
 
@@ -283,29 +279,28 @@ async function resolveSongOffline(song, artistName, aliases, catalog) {
   for (const t of catalog.tracks || []) {
     considerTrack(state, t, title, artists, 70);
   }
-  if (state.best && state.bestScore >= 90) {
+  // Prefer catalog-only hits to avoid Search rate limits
+  if (state.best && state.bestScore >= 85) {
     return playSourcePatchFromTrack(state.best);
   }
 
-  // Limit live search: primary term × cn+us only (hk covered via catalog)
-  const album = String(song?.album || song?.collection || "").trim();
-  const searchTerms = buildSearchTerms(title, artists, album).slice(0, 2);
-  const searchCountries = ["cn", "us"];
+  if (!allowSearch) {
+    return playSourcePatchFromTrack(state.best);
+  }
 
+  // One search term, one country — last resort for catalog misses
+  const searchTerms = buildSearchTerms(title, artists, song?.album || "").slice(0, 1);
   for (const term of searchTerms) {
-    if (state.best && state.bestScore >= 95) break;
-    for (const country of searchCountries) {
-      if (state.best && state.bestScore >= 95) break;
-      try {
-        const data = await itunesGet(
-          "/search",
-          { term, entity: "song", limit: 12, country },
-          { timeoutMs: 12000 }
-        );
-        for (const t of data?.results || []) considerTrack(state, t, title, artists);
-      } catch {
-        /* next */
-      }
+    try {
+      const data = await itunesGet("/search", {
+        term,
+        entity: "song",
+        limit: 10,
+        country: "cn",
+      });
+      for (const t of data?.results || []) considerTrack(state, t, title, artists);
+    } catch {
+      /* miss */
     }
   }
 
@@ -386,11 +381,15 @@ await mapPool(targets, ARTIST_CONCURRENCY, async (artist, idx) => {
     const byNeteaseId = {};
     const missNeteaseIds = [];
     let hits = 0;
+    const pendingSearch = [];
 
-    await mapPool(songs, SONG_CONCURRENCY, async (song) => {
+    // Pass 1: catalog-only (zero Search)
+    for (const song of songs) {
       const nid = String(song.neteaseId || song.id || "");
-      if (!nid) return;
-      const patch = await resolveSongOffline(song, artist.name, aliases, catalog);
+      if (!nid) continue;
+      const patch = await resolveSongOffline(song, artist.name, aliases, catalog, {
+        allowSearch: false,
+      });
       if (patch.playSource === "itunes" && patch.previewUrl) {
         byNeteaseId[nid] = {
           playSource: "itunes",
@@ -402,9 +401,34 @@ await mapPool(targets, ARTIST_CONCURRENCY, async (artist, idx) => {
         };
         hits += 1;
       } else {
-        missNeteaseIds.push(nid);
+        pendingSearch.push(song);
       }
-    });
+    }
+
+    // Pass 2: limited Search for catalog misses (cap per artist)
+    const searchCap = Math.min(8, pendingSearch.length);
+    for (let i = 0; i < pendingSearch.length; i++) {
+      const song = pendingSearch[i];
+      const nid = String(song.neteaseId || song.id || "");
+      if (i < searchCap) {
+        const patch = await resolveSongOffline(song, artist.name, aliases, catalog, {
+          allowSearch: true,
+        });
+        if (patch.playSource === "itunes" && patch.previewUrl) {
+          byNeteaseId[nid] = {
+            playSource: "itunes",
+            itunesTrackId: patch.itunesTrackId,
+            previewUrl: patch.previewUrl,
+            trackViewUrl: patch.trackViewUrl,
+            itunesTitle: patch.itunesTitle || "",
+            itunesArtistName: patch.itunesArtistName || "",
+          };
+          hits += 1;
+          continue;
+        }
+      }
+      missNeteaseIds.push(nid);
+    }
 
     const payload = {
       artistId: artist.id,
@@ -418,6 +442,7 @@ await mapPool(targets, ARTIST_CONCURRENCY, async (artist, idx) => {
     };
     fs.writeFileSync(outPath, JSON.stringify(payload), "utf8");
     ok.push({ id: artist.id, fileId, songs: songs.length, hits, misses: missNeteaseIds.length });
+    writeIndexFromDisk();
     console.log(
       `[${idx + 1}/${targets.length}] OK ${artist.name} (${songSource}) hit=${hits} miss=${missNeteaseIds.length}`
     );
@@ -428,26 +453,29 @@ await mapPool(targets, ARTIST_CONCURRENCY, async (artist, idx) => {
   await sleep(800);
 });
 
-// Rebuild index from all shards on disk (supports resume)
-const artistsIndex = {};
-for (const f of fs.readdirSync(OUT_DIR)) {
-  if (!f.endsWith(".json") || f === "index.json") continue;
-  try {
-    const pack = JSON.parse(fs.readFileSync(path.join(OUT_DIR, f), "utf8"));
-    const id = pack.artistId || path.basename(f, ".json");
-    artistsIndex[id] = path.basename(f, ".json");
-  } catch {
-    /* skip bad */
+function writeIndexFromDisk() {
+  const artistsIndex = {};
+  for (const f of fs.readdirSync(OUT_DIR)) {
+    if (!f.endsWith(".json") || f === "index.json") continue;
+    try {
+      const pack = JSON.parse(fs.readFileSync(path.join(OUT_DIR, f), "utf8"));
+      const id = pack.artistId || path.basename(f, ".json");
+      artistsIndex[id] = path.basename(f, ".json");
+    } catch {
+      /* skip bad */
+    }
   }
+  const index = {
+    generatedAt: new Date().toISOString(),
+    limit: LIMIT,
+    artists: artistsIndex,
+  };
+  fs.writeFileSync(path.join(OUT_DIR, "index.json"), JSON.stringify(index, null, 2), "utf8");
+  return artistsIndex;
 }
 
-const index = {
-  generatedAt: new Date().toISOString(),
-  limit: LIMIT,
-  artists: artistsIndex,
-};
-
-fs.writeFileSync(path.join(OUT_DIR, "index.json"), JSON.stringify(index, null, 2), "utf8");
+// Rebuild index from all shards on disk (supports resume)
+const artistsIndex = writeIndexFromDisk();
 
 console.log(
   `\nDone. ok=${ok.filter((x) => !x.skipped).length} skipped=${skipped.length} fail=${failed.length} index=${Object.keys(artistsIndex).length}`
