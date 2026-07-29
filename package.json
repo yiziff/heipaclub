@@ -14,7 +14,8 @@
     "db:init:local": "npx wrangler d1 execute heipaclub-rank --local --file=./schema.sql",
     "enrich": "node scripts/enrich-artwork.mjs",
     "roster": "node scripts/build-roster.mjs && node scripts/rebuild-from-cache.mjs",
-    "hot-tops": "node scripts/build-hot-tops.mjs"
+    "hot-tops": "node scripts/build-hot-tops.mjs",
+    "itunes:map": "node scripts/build-itunes-map.mjs"
   },
   "devDependencies": {
     "@cloudflare/vite-plugin": "^1.47.0",

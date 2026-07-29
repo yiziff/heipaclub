@@ -4,15 +4,20 @@
  * Prod: direct https://itunes.apple.com
  */
 
+import {
+  norm,
+  nameScore,
+  expandArtistAliases,
+  buildSearchTerms,
+  createTrackMatchState,
+  considerTrack,
+  playSourcePatchFromTrack,
+  playSourceCacheKey,
+} from "./itunes-match.js";
+import { lookupItunesMapEntry } from "./itunes-map.js";
+
 const ITUNES_BASE = import.meta.env.DEV ? "/api/itunes" : "https://itunes.apple.com";
 const COUNTRIES = ["cn", "hk", "us"];
-
-function norm(s) {
-  return String(s || "")
-    .toLowerCase()
-    .replace(/\s+/g, "")
-    .replace(/[·．._\-#（）()]/g, "");
-}
 
 export function itunesArt(url, size = 600) {
   if (!url) return "";
@@ -23,18 +28,6 @@ function yearOf(track) {
   const d = track?.releaseDate;
   if (!d) return "";
   return String(d).slice(0, 4);
-}
-
-function nameScore(query, artistName) {
-  const q = norm(query);
-  const n = norm(artistName);
-  if (!q || !n) return 0;
-  if (n === q) return 100;
-  if (n.includes(q) || q.includes(n)) return 80;
-  let hit = 0;
-  const parts = q.split(/(?=[a-z\u4e00-\u9fff])/i).filter((t) => t.length >= 2);
-  for (const t of parts) if (n.includes(t)) hit += 1;
-  return hit * 20;
 }
 
 async function itunesGet(pathname, query = {}, { timeoutMs = 10000 } = {}) {
@@ -280,82 +273,7 @@ export async function loadArtistCup(catalogArtist, { limit = 50 } = {}) {
   };
 }
 
-/** Strip feat./parens noise before title compare. */
-function titleCore(s) {
-  return String(s || "")
-    .replace(/\s*[\(（][^）)]*[\)）]\s*/g, " ")
-    .replace(/\s*(?:feat\.?|ft\.?|with)\s+.+$/i, "")
-    .replace(/\s+/g, " ")
-    .trim();
-}
-
-function titleScore(want, got) {
-  const a = norm(titleCore(want));
-  const b = norm(titleCore(got));
-  if (!a || !b) return 0;
-  if (a === b) return 100;
-  if (a.includes(b) || b.includes(a)) return 85;
-  return 0;
-}
-
 const playSourceCache = new Map();
-
-/** Common CN roster name → Apple Music / iTunes artist names */
-const ITUNES_NAME_HINTS = {
-  马思唯: ["Masiwei", "Higher Brothers"],
-  法老: ["Pharaoh"],
-  姜云升: ["Jiang Yunsheng"],
-  "GAI周延": ["GAI", "GAI Zhouyan"],
-  GAI周延: ["GAI"],
-  艾志恒Asen: ["Asen", "艾志恒"],
-  艾志恒: ["Asen"],
-  罗言: ["罗言"],
-  Jony: ["Jony J"],
-  "Jony J": ["Jony J"],
-  TizzyT: ["Tizzy T"],
-  "Tizzy T": ["Tizzy T"],
-  Rapeter: ["Rapeter", "Rapeter吴嘉轩"],
-  王以太: ["Wang Yitai"],
-};
-
-function splitArtistCredits(raw) {
-  return String(raw || "")
-    .split(/[,，、/&]|(?:\s+feat\.?\s+)|(?:\s+ft\.?\s+)|(?:\s+with\s+)/i)
-    .map((s) => s.trim())
-    .filter(Boolean);
-}
-
-function latinTokens(s) {
-  return (String(s || "").match(/[A-Za-z][A-Za-z0-9.$#]{1,}/g) || []).filter((t) => t.length >= 3);
-}
-
-function expandArtistAliases(artistName, song, artistAliases = []) {
-  const base = [
-    artistName,
-    song?.artist,
-    ...artistAliases,
-    ...splitArtistCredits(song?.artist),
-    ...splitArtistCredits(artistName),
-  ];
-  const out = [];
-  const seen = new Set();
-  for (const raw of base) {
-    const s = String(raw || "").trim();
-    if (!s) continue;
-    const candidates = [s, ...latinTokens(s), ...(ITUNES_NAME_HINTS[s] || [])];
-    // also hints keyed by roster name contained in string
-    for (const [cn, en] of Object.entries(ITUNES_NAME_HINTS)) {
-      if (s.includes(cn)) candidates.push(...en);
-    }
-    for (const c of candidates) {
-      const key = norm(c);
-      if (!key || seen.has(key)) continue;
-      seen.add(key);
-      out.push(c);
-    }
-  }
-  return out;
-}
 
 /**
  * Match a NetEase-picked song to an iTunes track with previewUrl.
@@ -364,111 +282,114 @@ function expandArtistAliases(artistName, song, artistAliases = []) {
 export async function resolvePlaySource(
   song,
   artistName,
-  { countries = ["cn", "hk", "us"], artistAliases = [], bypassCache = false } = {}
+  {
+    countries = ["cn", "us"],
+    artistAliases = [],
+    mapArtistId = "",
+    bypassCache = false,
+    budgetMs = 2800,
+  } = {}
 ) {
   const title = String(song?.title || "").trim();
-  const artists = expandArtistAliases(artistName, song, artistAliases);
   if (!title) {
     return { ...song, playSource: "netease", previewUrl: song?.previewUrl || "" };
   }
 
-  const cacheKey = `v3|${norm(artists.slice(0, 6).join(","))}|${norm(titleCore(title))}`;
+  const rosterId = String(mapArtistId || song?.rosterArtistId || "").trim();
+  const neteaseId = String(song?.neteaseId || "").trim();
+  if (rosterId && neteaseId) {
+    const mapped = await lookupItunesMapEntry(rosterId, neteaseId);
+    if (mapped?.kind === "hit") {
+      const patch = {
+        playSource: "itunes",
+        previewUrl: mapped.previewUrl || "",
+        itunesTrackId: mapped.itunesTrackId || "",
+        trackViewUrl: mapped.trackViewUrl || "",
+      };
+      return { ...song, ...patch };
+    }
+    if (mapped?.kind === "miss") {
+      const patch = {
+        playSource: "netease",
+        previewUrl: "",
+        itunesTrackId: "",
+        trackViewUrl: "",
+      };
+      return { ...song, ...patch };
+    }
+  }
+
+  const artists = expandArtistAliases(artistName, song, artistAliases);
+  const cacheKey = playSourceCacheKey(artists, title);
   if (!bypassCache && playSourceCache.has(cacheKey)) {
     const hit = playSourceCache.get(cacheKey);
     return { ...song, ...hit };
   }
 
-  let best = null;
-  let bestScore = 0;
-
-  const consider = (t, artistBoost = 0) => {
-    if (!t?.previewUrl || !t.trackName) return;
-    const ts = titleScore(title, t.trackName);
-    const as = Math.max(
-      ...artists.map((a) => nameScore(a, t.artistName || "")),
-      artistBoost,
-      0
-    );
-    // Title must be strong; artist soft-match OR exact title with any credit overlap
-    if (ts < 85) return;
-    if (as < 60 && ts < 100) return;
-    if (as < 40) return;
-    const score = ts * 0.7 + Math.max(as, 40) * 0.3;
-    if (score > bestScore) {
-      bestScore = score;
-      best = t;
-    }
-  };
-
+  const started = Date.now();
+  const timedOut = () => Date.now() - started >= budgetMs;
+  const state = createTrackMatchState();
   const album = String(song?.album || song?.collection || "").trim();
-  const searchTerms = [
-    ...artists.slice(0, 4).map((a) => [a, titleCore(title)].join(" ").trim()),
-    album ? [artists[0], album, titleCore(title)].filter(Boolean).join(" ").trim() : "",
-    titleCore(title),
-  ].filter((t, i, arr) => t && arr.indexOf(t) === i);
+  const primaryArtist = artists[0] || "";
+  const searchTerms = buildSearchTerms(title, artists, album);
 
   for (const term of searchTerms) {
-    for (const country of countries) {
-      try {
-        const data = await itunesGet("/search", {
-          term,
-          entity: "song",
-          limit: 16,
-          country,
-        });
-        for (const t of data?.results || []) consider(t);
-        if (best && bestScore >= 95) break;
-      } catch {
-        /* try next storefront */
+    if (timedOut() || (state.best && state.bestScore >= 95)) break;
+    try {
+      const batches = await Promise.all(
+        countries.map((country) =>
+          itunesGet(
+            "/search",
+            { term, entity: "song", limit: 12, country },
+            { timeoutMs: 3500 }
+          ).catch(() => null)
+        )
+      );
+      for (const data of batches) {
+        for (const t of data?.results || []) considerTrack(state, t, title, artists);
       }
+    } catch {
+      /* next term */
     }
-    if (best && bestScore >= 95) break;
   }
 
-  // 搜索常漏中文说唱：用艺人 lookup 扫曲库再比歌名（如 Asen / Celebrate）
-  if (!best || bestScore < 95) {
-    const artistIds = new Set();
-    if (song?.itunesArtistId) artistIds.add(String(song.itunesArtistId));
-    for (const name of artists.slice(0, 4)) {
+  if ((!state.best || state.bestScore < 95) && !timedOut()) {
+    const artistIds = [];
+    if (song?.itunesArtistId) artistIds.push(String(song.itunesArtistId));
+    if (!artistIds.length && primaryArtist) {
       try {
-        const hits = await searchArtist(name, { limit: 4, countries });
-        for (const h of hits.slice(0, 2)) {
-          if (h?.id) artistIds.add(String(h.id));
+        const hits = await searchArtist(primaryArtist, {
+          limit: 2,
+          countries: countries.slice(0, 2),
+        });
+        for (const h of hits.slice(0, 1)) {
+          if (h?.id) artistIds.push(String(h.id));
         }
       } catch {
         /* skip */
       }
     }
-    for (const id of [...artistIds].slice(0, 4)) {
+    const id = artistIds[0];
+    if (id && !timedOut()) {
       for (const country of countries) {
+        if (timedOut() || (state.best && state.bestScore >= 95)) break;
         try {
-          const tracks = await lookupSongs(id, country, 80);
-          for (const t of tracks) consider(t, 70);
-          if (best && bestScore >= 95) break;
+          const tracks = await lookupSongs(id, country, 60);
+          for (const t of tracks) considerTrack(state, t, title, artists, 70);
         } catch {
           /* skip */
         }
       }
-      if (best && bestScore >= 95) break;
     }
   }
 
-  let patch;
-  if (best) {
-    patch = {
-      playSource: "itunes",
-      previewUrl: best.previewUrl,
-      itunesTrackId: String(best.trackId),
-      trackViewUrl: best.trackViewUrl || best.collectionViewUrl || "",
-    };
-  } else {
-    patch = {
-      playSource: "netease",
-      previewUrl: "",
-      itunesTrackId: "",
-      trackViewUrl: "",
-    };
-  }
+  const full = playSourcePatchFromTrack(state.best);
+  const patch = {
+    playSource: full.playSource,
+    previewUrl: full.previewUrl,
+    itunesTrackId: full.itunesTrackId,
+    trackViewUrl: full.trackViewUrl,
+  };
   playSourceCache.set(cacheKey, patch);
   return { ...song, ...patch };
 }
@@ -476,7 +397,7 @@ export async function resolvePlaySource(
 export async function enrichSongsPlaySource(
   songs,
   artistName,
-  { concurrency = 5, artistAliases = [] } = {}
+  { concurrency = 5, artistAliases = [], mapArtistId = "" } = {}
 ) {
   const list = Array.isArray(songs) ? songs : [];
   if (!list.length) return [];
@@ -487,7 +408,7 @@ export async function enrichSongsPlaySource(
   async function worker() {
     while (cursor < list.length) {
       const idx = cursor++;
-      const resolved = await resolvePlaySource(list[idx], artistName, { artistAliases });
+      const resolved = await resolvePlaySource(list[idx], artistName, { artistAliases, mapArtistId });
       Object.assign(out[idx], {
         playSource: resolved.playSource,
         previewUrl: resolved.previewUrl || "",
@@ -511,6 +432,7 @@ export async function enrichSongsPlaySourceProgressive(
   {
     concurrency = 6,
     artistAliases = [],
+    mapArtistId = "",
     readyCount = 4,
     onSong = null,
   } = {}
@@ -522,7 +444,7 @@ export async function enrichSongsPlaySourceProgressive(
   }
 
   async function enrichIndex(idx) {
-    const resolved = await resolvePlaySource(list[idx], artistName, { artistAliases });
+    const resolved = await resolvePlaySource(list[idx], artistName, { artistAliases, mapArtistId });
     Object.assign(out[idx], {
       playSource: resolved.playSource,
       previewUrl: resolved.previewUrl || "",

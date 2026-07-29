@@ -122,9 +122,9 @@ export function createPlayer(root) {
     return { url: null, via: null, song };
   }
 
-  async function load(song, { autoplay = true, artistName = "", artistAliases = [] } = {}) {
+  async function load(song, { autoplay = true, artistName = "", artistAliases = [], mapArtistId = "" } = {}) {
     const seq = ++loadSeq;
-    lastLoadOpts = { artistName, artistAliases };
+    lastLoadOpts = { artistName, artistAliases, mapArtistId };
     current = song;
     card.hidden = false;
     paintMeta(song);
@@ -135,17 +135,18 @@ export function createPlayer(root) {
     let working = song;
     const confirmedItunes =
       working.playSource === "itunes" && Boolean(working.previewUrl);
+    const alreadyResolved =
+      confirmedItunes || working.playSource === "netease";
 
-    // 全局规则：先查 iTunes；没有预览再网易云
-    if (!confirmedItunes) {
-      // 纯 Apple 曲库曲目（无网易 ID）直接当 itunes
+    // 未决议：先查 iTunes；已决议：不再重复请求
+    if (!alreadyResolved) {
       if (working.previewUrl && !working.neteaseId) {
         working = { ...working, playSource: "itunes" };
       } else {
         try {
           working = await resolvePlaySource(working, artistName || working.artist || "", {
             artistAliases,
-            bypassCache: working.playSource === "netease" || !working.playSource,
+            mapArtistId: mapArtistId || working.rosterArtistId || "",
           });
         } catch {
           /* keep working */
@@ -157,24 +158,6 @@ export function createPlayer(root) {
     }
 
     let { url, via } = await resolveUrl(working);
-    if (seq !== loadSeq) return;
-
-    if (!url && working.playSource === "itunes") {
-      try {
-        working = await resolvePlaySource(working, artistName || working.artist || "", {
-          artistAliases,
-          bypassCache: true,
-        });
-        if (seq !== loadSeq) return;
-        current = working;
-        paintMeta(working);
-        ({ url, via } = await resolveUrl(working));
-        if (seq !== loadSeq) return;
-      } catch {
-        /* keep failed */
-      }
-    }
-
     if (seq !== loadSeq) return;
 
     if (!url) {

@@ -1658,6 +1658,7 @@ async function renderSetup(artistId) {
     enrichSongsPlaySourceProgressive(cupField, artist.name, {
       concurrency: 6,
       artistAliases: aliases,
+      mapArtistId: artist.id,
       readyCount: 4,
       onSong: (song) => {
         const st = loadState();
@@ -1986,17 +1987,28 @@ function patchPlaySourceInBracket(bracket, song) {
 
 async function ensureSongPlaySource(state, song) {
   if (!song) return song;
-  // 已确认 Apple 试听则复用；标成 netease 时仍再试一次 iTunes（避免误判锁死）
+  // 已判定过音源就直接用（iTunes / 网易云都算已决议），避免点试听重复打接口
   if (song.playSource === "itunes" && song.previewUrl) return song;
+  if (song.playSource === "netease") return song;
   const aliases = [state.artistSearch, state.artistName, song.rosterArtistName].filter(Boolean);
   const resolved = await resolvePlaySource(song, state.artistName, {
     artistAliases: aliases,
-    bypassCache: song.playSource === "netease",
+    mapArtistId: song.rosterArtistId || state.artistId || "",
   });
   const nextBracket = patchPlaySourceInBracket(state.bracket, resolved);
   const next = { ...state, bracket: nextBracket };
   saveState(next);
   return resolved;
+}
+
+/** 对战页预取双边音源，点试听时尽量秒开 */
+function prefetchMatchPlaySources(state, match) {
+  if (!state?.bracket || !match) return;
+  for (const side of [match.a, match.b]) {
+    if (!side) continue;
+    if (side.playSource === "itunes" || side.playSource === "netease") continue;
+    ensureSongPlaySource(state, side).catch(() => {});
+  }
 }
 
 function isSameSong(a, b) {
@@ -2518,6 +2530,8 @@ function renderMatch(state) {
 
   const player = createPlayer(document.getElementById("player-mount"));
   let previewReq = 0;
+  // 进入对战时后台预取 A/B 音源，减轻点试听等待
+  prefetchMatchPlaySources(state, match);
 
   app.querySelectorAll("[data-preview]").forEach((btn) => {
     btn.addEventListener("click", async (e) => {
@@ -2526,13 +2540,24 @@ function renderMatch(state) {
       const raw = side === "a" ? match.a : match.b;
       const latest = loadState() || state;
       const req = ++previewReq;
-      const song = await ensureSongPlaySource(latest, raw);
-      if (req !== previewReq) return;
-      player.load(song, {
-        autoplay: true,
-        artistName: song.rosterArtistName || latest.artistName || "",
-        artistAliases: [latest.artistSearch, song.rosterArtistName].filter(Boolean),
-      });
+      const prevLabel = btn.textContent;
+      btn.disabled = true;
+      btn.textContent = "匹配中…";
+      try {
+        const song = await ensureSongPlaySource(latest, raw);
+        if (req !== previewReq) return;
+        await player.load(song, {
+          autoplay: true,
+          artistName: song.rosterArtistName || latest.artistName || "",
+          artistAliases: [latest.artistSearch, song.rosterArtistName].filter(Boolean),
+          mapArtistId: song.rosterArtistId || latest.artistId || "",
+        });
+      } finally {
+        if (req === previewReq) {
+          btn.disabled = false;
+          btn.textContent = prevLabel || "试听";
+        }
+      }
     });
   });
 
@@ -3067,6 +3092,7 @@ function renderChamp(state) {
     autoplay: false,
     artistName: c.rosterArtistName || state.artistName || "",
     artistAliases: [state.artistSearch, c.rosterArtistName].filter(Boolean),
+    mapArtistId: c.rosterArtistId || state.artistId || "",
   });
   document.getElementById("cup-player").hidden = false;
 
