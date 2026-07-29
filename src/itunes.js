@@ -17,7 +17,7 @@ import {
 import { lookupItunesMapEntry } from "./itunes-map.js";
 
 const ITUNES_BASE = import.meta.env.DEV ? "/api/itunes" : "https://itunes.apple.com";
-const COUNTRIES = ["cn", "hk", "us"];
+const COUNTRIES = ["cn"];
 
 export function itunesArt(url, size = 600) {
   if (!url) return "";
@@ -58,7 +58,7 @@ export async function pingApi() {
 /**
  * Search music artists. Fast path: cn first, then hk if needed.
  */
-export async function searchArtist(keyword, { limit = 8, countries = ["cn", "hk", "us"] } = {}) {
+export async function searchArtist(keyword, { limit = 8, countries = ["cn"] } = {}) {
   const want = String(keyword || "").trim();
   if (!want) return [];
   const wantNorm = norm(want);
@@ -224,7 +224,7 @@ export async function loadArtistCup(catalogArtist, { limit = 50 } = {}) {
 
   // Search with primary name first (fast), then one alternate if needed
   for (const q of queries) {
-    const hits = await searchArtist(q, { limit: 5, countries: ["cn", "hk"] });
+    const hits = await searchArtist(q, { limit: 5, countries: ["cn"] });
     for (const h of hits) {
       const id = String(h.id);
       const prev = pooled.get(id);
@@ -283,7 +283,7 @@ export async function resolvePlaySource(
   song,
   artistName,
   {
-    countries = ["cn", "us"],
+    countries = ["cn"],
     artistAliases = [],
     mapArtistId = "",
     bypassCache = false,

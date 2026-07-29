@@ -42,7 +42,7 @@ const ONLY = new Set(
     .map((s) => s.trim())
     .filter(Boolean)
 );
-const COUNTRIES = ["cn", "hk", "us"];
+const COUNTRIES = ["cn"];
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 // Start gentle to avoid Apple IP bans; shrinks slowly on success, grows on 429
 let itunesBackoffMs = Number(process.env.ITUNES_MAP_DELAY_MS || 900);
@@ -245,7 +245,7 @@ async function loadArtistCatalog(artist, aliases) {
   let bestCand = null;
   // One storefront first; only widen if needed
   for (const q of uniq.slice(0, 2)) {
-    const hits = await searchItunesArtist(q, { limit: 3, countries: ["cn", "us"] });
+    const hits = await searchItunesArtist(q, { limit: 3, countries: ["cn"] });
     const top = hits[0];
     if (top && (!bestCand || top.score > bestCand.score)) bestCand = top;
     if (bestCand && bestCand.score >= 80) break;
@@ -253,7 +253,7 @@ async function loadArtistCatalog(artist, aliases) {
   if (!bestCand) return { itunesArtistId: "", tracks: [] };
 
   const byId = new Map();
-  for (const country of ["cn", "us", "hk"]) {
+  for (const country of ["cn"]) {
     try {
       const tracks = await lookupSongs(bestCand.id, country, 120);
       for (const t of tracks) {
