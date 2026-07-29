@@ -8,7 +8,14 @@
   },
   "assets": {
     "not_found_handling": "single-page-application",
-    "run_worker_first": ["/api/rank/*", "/api/netease/*"]
+    "run_worker_first": [
+      "/api/rank/*",
+      "/api/netease/*",
+      "/api/artist-top",
+      "/api/artist-top/*",
+      "/api/img",
+      "/api/img/*"
+    ]
   },
   "d1_databases": [
     {
@@ -17,6 +24,13 @@
       "database_id": "fcff2d6e-b8b5-4ab5-b2ff-7ba4ab20daef"
     }
   ],
+  "kv_namespaces": [
+    {
+      "binding": "ARTIST_TOP",
+      "id": "21212a674389435785b769f49c8b4c46",
+      "preview_id": "2f8ac73839b448f8904833b4a454e895"
+    }
+  ]
   // Local: copy .dev.vars.example → .dev.vars
   // Production: npx wrangler secret put NETEASE_API_ORIGIN
 }

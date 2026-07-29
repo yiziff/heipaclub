@@ -39,7 +39,7 @@ import {
   placeArtist,
   regionFilterMeta,
 } from "./hangla.js";
-import { loadArtistCup, pingApi, searchArtist as searchNeteaseArtist } from "./netease.js";
+import { expandArtistPool, loadArtistCup, pingApi, searchArtist as searchNeteaseArtist } from "./netease.js";
 import {
   enrichSongsPlaySourceProgressive,
   loadArtistCup as loadItunesArtistCup,
@@ -47,8 +47,11 @@ import {
   resolvePlaySource,
   searchArtist as searchItunesArtist,
 } from "./itunes.js";
+import { hasHotTopPack, loadHotTopPack } from "./hot-tops.js";
+import { fetchArtistTopCache, putArtistTopCache } from "./artist-top-cache.js";
 import { createPlayer, stopAllPageAudio } from "./player.js";
 import QRCode from "qrcode";
+import { buildShareCardBlob, warmShareCovers } from "./share-card.js";
 import {
   fetchArtistRank,
   fetchSongRank,
@@ -67,6 +70,7 @@ import {
   findRoundIndex,
   isRoundComplete,
   nearestFieldSize,
+  pickSongs,
   podiumFromBracket,
   progressText,
   roundLabel,
@@ -81,6 +85,13 @@ const app = document.getElementById("app");
 const artistCache = new Map();
 const runtimeArtistCatalog = new Map();
 const avatarFillInFlight = new Set();
+
+app?.addEventListener("click", (e) => {
+  const btn = e.target.closest("[data-about-site]");
+  if (!btn) return;
+  e.preventDefault();
+  openAboutSite();
+});
 
 function loadState() {
   try {
@@ -191,6 +202,83 @@ function bindBack() {
   });
 }
 
+function openAboutSite() {
+  const existing = document.getElementById("about-site");
+  if (existing) existing.remove();
+
+  const el = document.createElement("div");
+  el.id = "about-site";
+  el.className = "about-site";
+  el.setAttribute("role", "dialog");
+  el.setAttribute("aria-modal", "true");
+  el.setAttribute("aria-labelledby", "about-site-title");
+  el.innerHTML = `
+    <div class="about-site-backdrop" data-about-close></div>
+    <div class="about-site-panel">
+      <header class="about-site-head">
+        <div class="about-site-head-main">
+          <div class="about-site-icon brand-wordmark" aria-hidden="true">
+            <span class="brand-heipa">黑怕</span>
+          </div>
+          <h2 id="about-site-title">关于本站</h2>
+        </div>
+        <button type="button" class="about-site-close" data-about-close aria-label="关闭">×</button>
+      </header>
+      <div class="about-site-body">
+        <p>大家好！我是一名大四在读学生，非常喜欢各式的音乐，尤其喜欢 HipHop 这种表现形式。最近在网上经常刷到 MusicCup 的歌曲二选一，但发现大部分以流行音乐为主，没有什么说唱音乐的玩法，想着自己也是学计算机的，就想着自己着手实现一下。本网站从有这个想法到实现只用了不到三天，所以有些不妥的地方还希望大家多多包涵。</p>
+        <p>对 HipHop 的热爱让我做出了 HeiPaClub，希望这游戏也能给你带来一点快乐，选出你心中的 Rap Star 和 HitSong！Peace!</p>
+        <div class="about-site-section-label">作者账号</div>
+        <div class="about-site-links">
+          <a class="about-site-link-card" href="https://github.com/yiziff" target="_blank" rel="noopener noreferrer">
+            <span class="about-site-link-ico" aria-hidden="true">GH</span>
+            <span class="about-site-link-copy">
+              <strong>GitHub</strong>
+              <em>@yiziff</em>
+            </span>
+          </a>
+          <a class="about-site-link-card" href="https://v.douyin.com/Fe6sWPXT4MM/" target="_blank" rel="noopener noreferrer">
+            <span class="about-site-link-ico" aria-hidden="true">抖</span>
+            <span class="about-site-link-copy">
+              <strong>抖音</strong>
+              <em>打开主页</em>
+            </span>
+          </a>
+          <a class="about-site-link-card" href="https://xhslink.cn/m/3Gp9aRQVABJ" target="_blank" rel="noopener noreferrer">
+            <span class="about-site-link-ico" aria-hidden="true">红</span>
+            <span class="about-site-link-copy">
+              <strong>小红书</strong>
+              <em>@yizif</em>
+            </span>
+          </a>
+        </div>
+        <p class="about-site-footnote">
+          玩法灵感特别鸣谢
+          <a href="https://musiccup.app" target="_blank" rel="noopener noreferrer">MusicCup.app</a>
+        </p>
+      </div>
+      <button type="button" class="about-site-done" data-about-close>关闭</button>
+    </div>
+  `;
+  document.body.appendChild(el);
+  requestAnimationFrame(() => el.classList.add("is-on"));
+
+  const close = () => {
+    el.classList.remove("is-on");
+    el.classList.add("is-out");
+    setTimeout(() => el.remove(), 220);
+  };
+  el.querySelectorAll("[data-about-close]").forEach((node) => {
+    node.addEventListener("click", close);
+  });
+  const onKey = (ev) => {
+    if (ev.key === "Escape") {
+      document.removeEventListener("keydown", onKey);
+      close();
+    }
+  };
+  document.addEventListener("keydown", onKey);
+}
+
 async function softFillAvatars() {
   const noAvatar = ARTISTS.filter((a) => !a.avatar);
   if (!noAvatar.length) return;
@@ -247,13 +335,61 @@ async function hydrateArtist(id) {
   if (artistCache.has(id)) return artistCache.get(id);
   const base = getArtist(id) || runtimeArtistCatalog.get(id);
   if (!base) return null;
+
+  // ① VIP 静态包：常用歌手秒开
+  if (base.source !== "itunes" && hasHotTopPack(id)) {
+    try {
+      const pack = await loadHotTopPack(id);
+      if (pack?.songs?.length) {
+        const live = {
+          ...base,
+          neteaseArtistId: pack.neteaseArtistId || base.neteaseArtistId,
+          neteaseArtistName: pack.name || base.name,
+          avatar: pack.avatar || base.avatar || "",
+          songs: pack.songs.slice(0, TOP_N),
+          fromHotTopPack: true,
+        };
+        artistCache.set(id, live);
+        base.avatar = live.avatar;
+        return live;
+      }
+    } catch (_) {
+      /* fall through */
+    }
+  }
+
+  // ② KV 记忆：24h 内别人拉过 → 边缘命中
+  if (base.source !== "itunes" && base.neteaseArtistId) {
+    try {
+      const cached = await fetchArtistTopCache(base.neteaseArtistId);
+      if (cached?.songs?.length) {
+        const live = {
+          ...base,
+          neteaseArtistId: cached.neteaseArtistId || base.neteaseArtistId,
+          neteaseArtistName: cached.name || base.name,
+          avatar: cached.avatar || base.avatar || "",
+          songs: cached.songs.slice(0, TOP_N),
+          fromKvCache: true,
+        };
+        artistCache.set(id, live);
+        if (live.avatar) base.avatar = live.avatar;
+        return live;
+      }
+    } catch (_) {
+      /* fall through to live */
+    }
+  }
+
+  // ③ 实时拉（已去 ping / 并行）；成功后写入 KV 造福后来者
   const live =
     base.source === "itunes"
       ? await loadItunesArtistCup(base, { limit: TOP_N })
       : await loadArtistCup(base, { limit: TOP_N });
   artistCache.set(id, live);
-  // also stash avatar on catalog for home
   base.avatar = live.avatar;
+  if (base.source !== "itunes" && live?.neteaseArtistId && live?.songs?.length) {
+    putArtistTopCache(live);
+  }
   return live;
 }
 
@@ -541,9 +677,13 @@ function renderHome() {
         <h1>黑怕<br /><em>巅峰对决</em></h1>
       </div>
       <p class="hero-tagline">
-        给你的本命 Rapper 办一场真正的说唱巅峰对决<br />
-        <span>单曲对决 · 厂牌对抗 · 从夯到拉 · 选出你心中的 Rap Star</span>
+        <span class="hero-tagline-row">
+          <span class="hero-tagline-lead">给你的本命 Rapper 办一场真正的说唱巅峰对决</span>
+          <span class="hero-thanks">特别鸣谢：<a href="https://musiccup.app" target="_blank" rel="noopener noreferrer">MusicCup.app</a></span>
+        </span>
+        <span class="hero-tagline-sub">单曲对决 · 厂牌对抗 · 从夯到拉 · 选出你心中的 Rap Star</span>
       </p>
+      <button type="button" class="about-site-btn" data-about-site>[关于本站]</button>
     </section>
     <div class="section-title">选择歌手 <span id="artist-count">50 / ${ARTISTS.length} 位 Rapper（首页展示）</span></div>
     <div class="search-row">
@@ -1448,30 +1588,121 @@ async function renderSetup(artistId) {
 
   let artist;
   try {
-    const online = base.source === "itunes" ? await pingItunesApi() : await pingApi();
-    if (!online) {
-      throw new Error(
-        base.source === "itunes"
-          ? "连不上 iTunes 接口，请检查网络后重试"
-          : "连不上音乐接口，请先启动本地服务后再刷新"
-      );
-    }
     artist = await hydrateArtist(artistId);
   } catch (e) {
+    const msg = String(e?.message || e || "");
+    const offlineHint =
+      /Failed to fetch|NetworkError|HTTP 5\d\d|unavailable/i.test(msg)
+        ? base.source === "itunes"
+          ? "连不上 iTunes 接口，请检查网络后重试"
+          : "连不上音乐接口，请稍后重试"
+        : msg;
     app.innerHTML = shell(
-      `<section class="setup"><p class="loading-line">拉取失败：${esc(e.message || e)}</p></section>`,
+      `<section class="setup"><p class="loading-line">拉取失败：${esc(offlineHint)}</p></section>`,
       { back: "/" }
     );
     bindBack();
     return;
   }
 
-  const fieldSize = nearestFieldSize(Math.min(artist.songs.length, FIELD_MAX), { max: FIELD_MAX });
+  const canExpand =
+    artist.source !== "itunes" && /^\d+$/.test(String(artist.neteaseArtistId || ""));
+  let poolSongs = [...(artist.songs || [])];
+  /** @type {"hot50"|"top100"|"all"} */
+  let expandStage = poolSongs.length >= 90 ? "top100" : "hot50";
+  let expandLoading = false;
+  let pickMode = false;
+  /** @type {Set<string>} */
+  let selectedIds = new Set();
+
+  const fieldSize = () =>
+    nearestFieldSize(Math.min(poolSongs.length, FIELD_MAX), { max: FIELD_MAX });
   let mode = "battle";
-  let fieldSongs = buildField(artist.songs, { mode, max: FIELD_MAX });
+  let fieldSongs = buildField(poolSongs, { mode, max: FIELD_MAX });
+
+  const setupToast = (msg) => {
+    let el = document.getElementById("setup-toast");
+    if (!el) {
+      el = document.createElement("div");
+      el.id = "setup-toast";
+      el.className = "setup-toast";
+      document.body.appendChild(el);
+    }
+    el.textContent = msg;
+    el.classList.add("show");
+    clearTimeout(el._t);
+    el._t = setTimeout(() => el.classList.remove("show"), 2200);
+  };
+
+  const syncArtistPool = () => {
+    artist.songs = poolSongs;
+    artistCache.set(artist.id, artist);
+  };
+
+  const selectedSongsInPoolOrder = () =>
+    poolSongs.filter((s) => selectedIds.has(songKey(s)));
+
+  const startCupWithField = (cupField) => {
+    const aliases = [artist.search, artist.neteaseArtistName].filter(Boolean);
+    const bracket = buildBracket(poolSongs, {
+      mode,
+      max: FIELD_MAX,
+      field: cupField,
+    });
+    saveState({
+      artistId: artist.id,
+      artistName: artist.name,
+      artistAvatar: artist.avatar || "",
+      neteaseArtistId: artist.neteaseArtistId || "",
+      artistSearch: artist.search || "",
+      playSourceReady: 0,
+      bracket,
+    });
+    navigate("/bracket");
+    enrichSongsPlaySourceProgressive(cupField, artist.name, {
+      concurrency: 6,
+      artistAliases: aliases,
+      readyCount: 4,
+      onSong: (song) => {
+        const st = loadState();
+        if (!st?.bracket) return;
+        st.bracket = patchPlaySourceInBracket(st.bracket, song);
+        saveState(st);
+      },
+    })
+      .then(({ background }) => background)
+      .then((all) => {
+        const st = loadState();
+        if (!st?.bracket || !all?.length) return;
+        let next = st.bracket;
+        for (const song of all) next = patchPlaySourceInBracket(next, song);
+        const itunesN = all.filter((x) => x.playSource === "itunes").length;
+        saveState({
+          ...st,
+          bracket: next,
+          playSourceStats: { itunes: itunesN, total: all.length },
+          playSourceReady: all.length,
+        });
+      })
+      .catch(() => {});
+  };
 
   const paint = () => {
-    const preview = fieldSongs;
+    const size = fieldSize();
+    const pickCount = selectedIds.size;
+    const pickReady = pickCount === FIELD_MAX;
+    // 始终展示完整曲库；一键开赛仍只取热度前 size 首
+    const listSongs = poolSongs;
+    const fieldKeySet = new Set(
+      (pickMode ? [...selectedIds] : poolSongs.slice(0, size).map((s) => songKey(s))).filter(Boolean)
+    );
+    const expandLabel =
+      expandStage === "hot50"
+        ? "再展开到 Top 100"
+        : expandStage === "top100"
+          ? "展示全部歌曲"
+          : "";
+    const showExpand = canExpand && expandStage !== "all" && !!expandLabel;
 
     app.innerHTML = shell(
       `
@@ -1480,7 +1711,7 @@ async function renderSetup(artistId) {
           ${imgTag(artist.avatar, { alt: artist.name, className: "setup-avatar" })}
           <div>
             <h1>${esc(artist.name)}</h1>
-            <p>${esc(artist.city)} · ${esc(artist.tag)} · 热门 ${artist.songs.length} 首 · ${fieldSize} 强</p>
+            <p>${esc(artist.city)} · ${esc(artist.tag)} · 曲库 ${poolSongs.length} 首 · ${size} 强</p>
           </div>
         </div>
         <div class="section-title">对阵玩法</div>
@@ -1488,27 +1719,70 @@ async function renderSetup(artistId) {
           <button type="button" class="mode-chip ${mode === "battle" ? "active" : ""}" data-mode="battle">1v1 Battle</button>
           <button type="button" class="mode-chip ${mode === "hot" ? "active" : ""}" data-mode="hot">热门顺序</button>
         </div>
+        ${
+          pickMode
+            ? `<div class="pick-status ${pickReady ? "is-ready" : ""}" id="pick-status">已选曲目：(${pickCount}/${FIELD_MAX})</div>`
+            : ""
+        }
         <div class="setup-actions">
-          <button type="button" class="primary-btn" id="start-btn">一键开赛 · ${fieldSize} 强</button>
           ${
-            mode === "battle"
-              ? `<button type="button" class="ghost-btn" id="reshuffle-btn">再打乱一次</button>`
-              : ""
+            pickMode
+              ? `<button type="button" class="primary-btn" id="custom-start-btn" ${
+                  pickReady ? "" : "disabled"
+                }>生成专属签表并开赛</button>
+                 <button type="button" class="ghost-btn" id="pick-toggle-btn">取消自组</button>
+                 ${
+                   mode === "battle" && pickReady
+                     ? `<button type="button" class="ghost-btn" id="reshuffle-pick-btn">打乱已选对位</button>`
+                     : ""
+                 }`
+              : `<button type="button" class="primary-btn" id="start-btn">一键开赛 · ${size} 强</button>
+                 <button type="button" class="ghost-btn" id="pick-toggle-btn">自组${FIELD_MAX}强</button>
+                 ${
+                   mode === "battle"
+                     ? `<button type="button" class="ghost-btn" id="reshuffle-btn">再打乱一次</button>`
+                     : ""
+                 }`
           }
         </div>
-        <div class="section-title">参赛签表（${fieldSize} / Top ${artist.songs.length}）</div>
-        <ul class="song-preview">
-          ${preview
-            .map(
-              (s, i) => `
-              <li>
+        <div class="section-title">${
+          pickMode
+            ? `自组选歌（曲库 ${poolSongs.length} 首）`
+            : `曲库列表（一键开赛取热度前 ${size} / 共 ${poolSongs.length}）`
+        }</div>
+        <ul class="song-preview ${pickMode ? "pick-mode" : "pool-mode"}">
+          ${listSongs
+            .map((s, i) => {
+              const key = songKey(s);
+              const checked = selectedIds.has(key);
+              const inField = !pickMode && fieldKeySet.has(key);
+              const vsHint =
+                !pickMode &&
+                mode === "battle" &&
+                i < size &&
+                i % 2 === 0 &&
+                listSongs[i + 1] &&
+                i + 1 < size
+                  ? ` · vs ${esc(listSongs[i + 1].title)}`
+                  : "";
+              return `
+              <li class="${
+                pickMode && checked ? "is-picked" : inField ? "in-field" : ""
+              }" ${pickMode ? `data-pick="${esc(key)}"` : ""}>
+                ${
+                  pickMode
+                    ? `<input type="checkbox" class="song-pick-cb" data-pick-id="${esc(
+                        key
+                      )}" ${checked ? "checked" : ""} aria-label="选择 ${esc(s.title)}" />`
+                    : inField
+                      ? `<span class="song-field-tag">签</span>`
+                      : `<span class="song-field-tag muted">${i + 1}</span>`
+                }
                 ${imgTag(coverUrl(s, artist.avatar), { alt: s.title, className: "song-cover" })}
                 <span class="song-preview-text">
                   <strong>${i + 1}. ${esc(s.title)}</strong>
-                  <em>${esc(s.album || "单曲")}${
-                    mode === "battle" && i % 2 === 0 && preview[i + 1]
-                      ? ` · vs ${esc(preview[i + 1].title)}`
-                      : ""
+                  <em>${esc(s.album || "单曲")}${vsHint}${
+                    inField && !pickMode ? " · 将参赛" : ""
                   }${
                     s.playSource === "itunes"
                       ? " · Apple"
@@ -1517,10 +1791,17 @@ async function renderSetup(artistId) {
                         : ""
                   }</em>
                 </span>
-              </li>`
-            )
+              </li>`;
+            })
             .join("")}
         </ul>
+        ${
+          showExpand
+            ? `<button type="button" class="setup-expand-btn" id="expand-btn" ${
+                expandLoading ? "disabled" : ""
+              }>${expandLoading ? "加载中…" : expandLabel}</button>`
+            : ""
+        }
       </section>
     `,
       { back: "/" }
@@ -1530,68 +1811,145 @@ async function renderSetup(artistId) {
     app.querySelectorAll("[data-mode]").forEach((chip) => {
       chip.addEventListener("click", () => {
         mode = chip.dataset.mode;
-        fieldSongs = buildField(artist.songs, { mode, max: FIELD_MAX });
+        if (!pickMode) {
+          fieldSongs = buildField(poolSongs, { mode, max: FIELD_MAX });
+        }
         paint();
       });
     });
 
-    document.getElementById("reshuffle-btn")?.addEventListener("click", () => {
-      fieldSongs = buildField(artist.songs, { mode: "battle", max: FIELD_MAX });
+    document.getElementById("pick-toggle-btn")?.addEventListener("click", () => {
+      if (pickMode) {
+        pickMode = false;
+        selectedIds = new Set();
+        fieldSongs = buildField(poolSongs, { mode, max: FIELD_MAX });
+      } else {
+        pickMode = true;
+        selectedIds = new Set(fieldSongs.map((s) => songKey(s)).filter(Boolean));
+      }
       paint();
     });
 
-    document.getElementById("start-btn").addEventListener("click", () => {
+    document.getElementById("reshuffle-btn")?.addEventListener("click", () => {
+      fieldSongs = buildField(poolSongs, { mode: "battle", max: FIELD_MAX });
+      paint();
+    });
+
+    document.getElementById("reshuffle-pick-btn")?.addEventListener("click", () => {
+      const picked = selectedSongsInPoolOrder();
+      if (picked.length !== FIELD_MAX) {
+        setupToast(`请确保选中刚好 ${FIELD_MAX} 首单曲`);
+        return;
+      }
+      artist._pickShuffle = pickSongs(picked, "battle");
+      setupToast("已打乱对位，开赛时生效");
+      paint();
+    });
+
+    const togglePick = (key) => {
+      if (!key) return;
+      if (selectedIds.has(key)) {
+        selectedIds.delete(key);
+        artist._pickShuffle = null;
+        paint();
+        return;
+      }
+      if (selectedIds.size >= FIELD_MAX) {
+        setupToast(`最多选 ${FIELD_MAX} 首`);
+        return;
+      }
+      selectedIds.add(key);
+      artist._pickShuffle = null;
+      paint();
+    };
+
+    app.querySelectorAll(".song-pick-cb").forEach((cb) => {
+      cb.addEventListener("change", (e) => {
+        e.stopPropagation();
+        const key = cb.dataset.pickId;
+        if (cb.checked) {
+          if (selectedIds.size >= FIELD_MAX && !selectedIds.has(key)) {
+            cb.checked = false;
+            setupToast(`最多选 ${FIELD_MAX} 首`);
+            return;
+          }
+          selectedIds.add(key);
+        } else {
+          selectedIds.delete(key);
+        }
+        artist._pickShuffle = null;
+        paint();
+      });
+    });
+    app.querySelectorAll("li[data-pick]").forEach((li) => {
+      li.addEventListener("click", (e) => {
+        if (e.target.closest(".song-pick-cb")) return;
+        togglePick(li.dataset.pick);
+      });
+    });
+
+    document.getElementById("start-btn")?.addEventListener("click", () => {
       const btn = document.getElementById("start-btn");
       btn.disabled = true;
-      const aliases = [artist.search, artist.neteaseArtistName].filter(Boolean);
       try {
-        const bracket = buildBracket(artist.songs, {
-          mode,
-          max: FIELD_MAX,
-          field: fieldSongs,
-        });
-        saveState({
-          artistId: artist.id,
-          artistName: artist.name,
-          artistAvatar: artist.avatar || "",
-          neteaseArtistId: artist.neteaseArtistId || "",
-          artistSearch: artist.search || "",
-          playSourceReady: 0,
-          bracket,
-        });
-        // 先跳进对阵图，播放源后台补齐
-        navigate("/bracket");
-        enrichSongsPlaySourceProgressive(fieldSongs, artist.name, {
-          concurrency: 6,
-          artistAliases: aliases,
-          readyCount: 4,
-          onSong: (song) => {
-            const st = loadState();
-            if (!st?.bracket) return;
-            st.bracket = patchPlaySourceInBracket(st.bracket, song);
-            saveState(st);
-          },
-        })
-          .then(({ background }) => background)
-          .then((all) => {
-            const st = loadState();
-            if (!st?.bracket || !all?.length) return;
-            let next = st.bracket;
-            for (const song of all) next = patchPlaySourceInBracket(next, song);
-            const itunesN = all.filter((x) => x.playSource === "itunes").length;
-            saveState({
-              ...st,
-              bracket: next,
-              playSourceStats: { itunes: itunesN, total: all.length },
-              playSourceReady: all.length,
-            });
-          })
-          .catch(() => {});
+        startCupWithField(fieldSongs);
       } catch (e) {
         btn.disabled = false;
         alert(`开赛失败：${e.message || e}`);
       }
-    })
+    });
+
+    document.getElementById("custom-start-btn")?.addEventListener("click", () => {
+      const btn = document.getElementById("custom-start-btn");
+      const picked =
+        artist._pickShuffle?.length === FIELD_MAX
+          ? artist._pickShuffle
+          : pickSongs(selectedSongsInPoolOrder(), mode);
+      if (picked.length !== FIELD_MAX) {
+        setupToast(`请确保选中刚好 ${FIELD_MAX} 首单曲`);
+        return;
+      }
+      btn.disabled = true;
+      try {
+        startCupWithField(picked);
+      } catch (e) {
+        btn.disabled = false;
+        alert(`开赛失败：${e.message || e}`);
+      }
+    });
+
+    document.getElementById("expand-btn")?.addEventListener("click", async () => {
+      if (!canExpand || expandLoading || expandStage === "all") return;
+      const target = expandStage === "hot50" ? "top100" : "all";
+      expandLoading = true;
+      paint();
+      try {
+        const result = await expandArtistPool(poolSongs, artist.neteaseArtistId, target);
+        poolSongs = result.songs;
+        expandStage = result.stage;
+        if (result.stage === "top100" && !result.more) {
+          expandStage = "all";
+        }
+        syncArtistPool();
+        if (!pickMode) {
+          fieldSongs = buildField(poolSongs, { mode, max: FIELD_MAX });
+        }
+        putArtistTopCache({
+          ...artist,
+          songs: poolSongs.slice(0, 100),
+        });
+        setupToast(
+          target === "top100"
+            ? `已展开到 ${poolSongs.length} 首`
+            : `已加载全部 ${poolSongs.length} 首`
+        );
+      } catch (e) {
+        setupToast(e.message || "扩库失败，请稍后重试");
+      } finally {
+        expandLoading = false;
+        paint();
+      }
+    });
   };
 
   paint();
@@ -1649,16 +2007,22 @@ function isSameSong(a, b) {
   return Boolean(ka && kb && ka === kb);
 }
 
-function bracketSlot(song, fallbackAvatar, { onPath = false, roundIndex = -1, wing = "" } = {}) {
+function bracketSlot(
+  song,
+  fallbackAvatar,
+  { onPath = false, won = null, roundIndex = -1, wing = "" } = {}
+) {
   if (!song) {
     return `<div class="bracket-slot is-empty"><span>待定</span></div>`;
   }
   const pathCls = onPath ? " on-path" : "";
+  const resultCls =
+    won === true ? " is-winner" : won === false ? " is-loser" : "";
   const pathAttrs = onPath
     ? ` data-path-round="${roundIndex}" data-path-wing="${esc(wing)}"`
     : "";
   return `
-    <div class="bracket-slot${pathCls}" title="${esc(song.title)}"${pathAttrs}>
+    <div class="bracket-slot${pathCls}${resultCls}" title="${esc(song.title)}"${pathAttrs}>
       ${imgTag(coverUrl(song, fallbackAvatar), { alt: song.title, className: "bracket-slot-cover" })}
       <span class="bracket-slot-title">${esc(song.title)}</span>
     </div>
@@ -1686,11 +2050,13 @@ function renderRoundColumn(matches, label, side, fallbackAvatar, champ, roundInd
             }">
               ${bracketSlot(m.a, fallbackAvatar, {
                 onPath: isSameSong(m.a, champ),
+                won: m.winner ? isSameSong(m.a, m.winner) : null,
                 roundIndex,
                 wing: side,
               })}
               ${bracketSlot(m.b, fallbackAvatar, {
                 onPath: isSameSong(m.b, champ),
+                won: m.winner ? isSameSong(m.b, m.winner) : null,
                 roundIndex,
                 wing: side,
               })}
@@ -1768,11 +2134,21 @@ function renderBracketHtml(bracket, fallbackAvatar) {
           }">
             ${bracketSlot(finalMatch.a, fallbackAvatar, {
               onPath: isSameSong(finalMatch.a, champ),
+              won: finalMatch.winner
+                ? isSameSong(finalMatch.a, finalMatch.winner)
+                : champ
+                  ? isSameSong(finalMatch.a, champ)
+                  : null,
               roundIndex: finalIndex,
               wing: "center",
             })}
             ${bracketSlot(finalMatch.b, fallbackAvatar, {
               onPath: isSameSong(finalMatch.b, champ),
+              won: finalMatch.winner
+                ? isSameSong(finalMatch.b, finalMatch.winner)
+                : champ
+                  ? isSameSong(finalMatch.b, champ)
+                  : null,
               roundIndex: finalIndex,
               wing: "center",
             })}
@@ -1829,17 +2205,9 @@ function drawChampionPathChain(board) {
 
   const defs = document.createElementNS(ns, "defs");
   defs.innerHTML = `
-    <filter id="champ-path-glow" x="-40%" y="-40%" width="180%" height="180%">
-      <feGaussianBlur stdDeviation="1.2" result="blur"/>
-      <feMerge>
-        <feMergeNode in="blur"/>
-        <feMergeNode in="SourceGraphic"/>
-      </feMerge>
-    </filter>
     <linearGradient id="champ-path-grad" x1="0%" y1="0%" x2="100%" y2="0%">
-      <stop offset="0%" stop-color="#c6e86a" stop-opacity="0.55"/>
-      <stop offset="50%" stop-color="#b8ff1a" stop-opacity="0.7"/>
-      <stop offset="100%" stop-color="#8fbf20" stop-opacity="0.55"/>
+      <stop offset="0%" stop-color="#8fbf20" stop-opacity="1"/>
+      <stop offset="100%" stop-color="#8fbf20" stop-opacity="1"/>
     </linearGradient>
   `;
   svg.appendChild(defs);
@@ -1934,35 +2302,63 @@ function drawChampionPathChain(board) {
     line.setAttribute("d", d);
     line.setAttribute("class", "path-chain-line");
     line.setAttribute("fill", "none");
-    line.setAttribute("filter", "url(#champ-path-glow)");
     svg.appendChild(line);
   }
 
   board.appendChild(svg);
 }
 
+/**
+ * Scale bracket board into fit box without asymmetric clip.
+ * Uses top-left origin + margin centering so overflow:hidden keeps both wings.
+ */
+function fitBracketBoard(fit, board, { pad = 0.96, maxAvailH } = {}) {
+  if (!fit || !board) return 1;
+
+  board.style.transform = "none";
+  board.style.left = "";
+  board.style.marginLeft = "0";
+  board.style.marginRight = "0";
+  board.style.marginBottom = "0";
+  fit.style.height = "";
+
+  const parentW = fit.parentElement?.getBoundingClientRect().width || window.innerWidth;
+  const availW = Math.min(
+    fit.getBoundingClientRect().width || fit.clientWidth || parentW,
+    parentW,
+    window.innerWidth - 8
+  );
+  const availH =
+    maxAvailH ??
+    (Math.min(
+      fit.clientHeight || 0,
+      Math.max(280, window.innerHeight - (window.innerWidth <= 720 ? 160 : 200))
+    ) || Math.max(280, window.innerHeight - 200));
+  const needW = Math.max(board.scrollWidth, 1);
+  const needH = Math.max(board.scrollHeight, 1);
+  const scale = Math.min(availW / needW, availH / needH, 1) * pad;
+  const visualW = needW * scale;
+  const visualH = needH * scale;
+
+  board.style.transformOrigin = "top left";
+  board.style.transform = `scale(${scale})`;
+  board.style.marginLeft = `${Math.max(0, (availW - visualW) / 2)}px`;
+  // reclaim unused layout space created by CSS transform (layout stays at needW×needH)
+  board.style.marginRight = `${visualW - needW}px`;
+  board.style.marginBottom = `${visualH - needH}px`;
+  fit.style.height = `${Math.ceil(visualH + 4)}px`;
+  fit.style.minHeight = `${Math.ceil(visualH + 4)}px`;
+
+  requestAnimationFrame(() => drawChampionPathChain(board));
+  return scale;
+}
+
 function fitBracketToScreen() {
   const fit = document.getElementById("bracket-fit");
   const board = document.getElementById("bracket-board");
   if (!fit || !board) return;
-
-  board.style.transform = "none";
-
-  // Use viewport-bounded width — board is width:max-content and must not inflate availW
-  const parentW = fit.parentElement?.getBoundingClientRect().width || window.innerWidth;
-  const availW = Math.min(fit.getBoundingClientRect().width || fit.clientWidth, parentW, window.innerWidth - 8);
-  const availH = Math.min(
-    fit.clientHeight || 0,
-    Math.max(280, window.innerHeight - (window.innerWidth <= 720 ? 160 : 200))
-  ) || Math.max(280, window.innerHeight - 200);
-  const needW = Math.max(board.scrollWidth, 1);
-  const needH = Math.max(board.scrollHeight, 1);
-  const pad = window.innerWidth <= 720 ? 0.9 : 0.98;
-  const scale = Math.min(availW / needW, availH / needH) * pad;
-
-  board.style.transformOrigin = "center center";
-  board.style.transform = `scale(${scale})`;
-  requestAnimationFrame(() => drawChampionPathChain(board));
+  const pad = window.innerWidth <= 720 ? 0.88 : 0.98;
+  fitBracketBoard(fit, board, { pad });
 }
 
 function renderBracketPreview(state) {
@@ -1971,6 +2367,8 @@ function renderBracketPreview(state) {
   let cancelled = false;
   let pollTimer = null;
   let started = false;
+
+  void warmShareCovers(state);
 
   app.innerHTML = shell(
     `
@@ -2241,6 +2639,8 @@ function openShareBracket(state) {
   const existing = document.getElementById("share-bracket");
   if (existing) existing.remove();
 
+  void warmShareCovers(state);
+
   const avatar = state.artistAvatar || "";
   const c = state.bracket.champion;
   const el = document.createElement("div");
@@ -2250,29 +2650,38 @@ function openShareBracket(state) {
     <div class="share-bracket-panel">
       <header class="share-bracket-head">
         <div>
-          <h2>${esc(state.artistName)} · ${state.bracket.size} 强对阵图</h2>
+          <h2>${esc(state.artistName)}</h2>
           <p class="share-bracket-champ-line">冠军 · <span class="share-bracket-champ-song">${esc(
             c?.title || ""
           )}</span></p>
         </div>
         <div class="share-bracket-actions">
-          <button type="button" class="primary-btn" id="share-save-btn">保存图片</button>
+          <button type="button" class="share-save-btn" id="share-save-btn" disabled>保存照片</button>
           <button type="button" class="ghost-btn" id="share-close-btn">关闭</button>
         </div>
       </header>
-      <div class="share-bracket-stage" id="share-bracket-capture">
-        <div class="share-bracket-brand">黑怕巅峰对决</div>
-        ${renderBracketHtml(state.bracket, avatar)}
-        <div class="share-bracket-qr">
-          <canvas id="share-qr-canvas" width="132" height="132" aria-label="网站二维码"></canvas>
-          <div class="share-bracket-qr-copy">
-            <div class="share-bracket-site">
-              <span class="share-site-name" aria-label="heipaclub.com">
-                <span class="share-site-heipa">HEIPA</span><span class="share-site-club">CLUB</span><span class="share-site-tld">.COM</span>
-              </span>
-              <span class="share-site-z" aria-hidden="true">z</span>
+      <div class="share-bracket-stage">
+        <div class="share-bracket-card" id="battle-card">
+          <div class="share-bracket-brand brand-wordmark" aria-label="黑怕巅峰对决">
+            <span class="brand-heipa">黑怕</span><span class="brand-duel">巅峰对决</span>
+          </div>
+          ${renderBracketHtml(state.bracket, avatar)}
+          <button type="button" class="share-cta-btn" id="share-go-btn">
+            <svg class="share-cta-ico" viewBox="0 0 24 24" width="18" height="18" aria-hidden="true">
+              <path fill="currentColor" d="M12 3.2a1 1 0 0 1 .7.3l3.5 3.5a1 1 0 1 1-1.4 1.4L13 6.6V15a1 1 0 1 1-2 0V6.6L8.2 8.4a1 1 0 1 1-1.4-1.4L10.3 3.5a1 1 0 0 1 .7-.3Z"/>
+              <path fill="currentColor" d="M5 12a1 1 0 0 1 1 1v5h12v-5a1 1 0 1 1 2 0v6a1 1 0 0 1-1 1H5a1 1 0 0 1-1-1v-6a1 1 0 0 1 1-1Z"/>
+            </svg>
+            <span>分享</span>
+          </button>
+          <div class="share-bracket-qr">
+            <div class="share-bracket-qr-copy">
+              <div class="share-bracket-site">
+                <span class="share-site-name" aria-label="heipaclub.com">HEIPACLUB.COM</span>
+                <span class="share-site-z" aria-hidden="true">z</span>
+              </div>
+              <em class="share-bracket-slogan">给你的本命 RapStar 办一场真正的说唱巅峰对决</em>
             </div>
-            <em class="share-bracket-slogan">给你的本命 RapStar 办一场真正的说唱巅峰对决</em>
+            <canvas id="share-qr-canvas" width="66" height="66" aria-label="网站二维码"></canvas>
           </div>
         </div>
       </div>
@@ -2283,14 +2692,12 @@ function openShareBracket(state) {
     const fit = el.querySelector("#bracket-fit");
     const board = el.querySelector("#bracket-board");
     if (!fit || !board) return;
-    board.style.transform = "none";
-    const availW = fit.clientWidth;
-    const availH = fit.clientHeight || Math.max(280, window.innerHeight * 0.62);
-    const scale =
-      Math.min(availW / Math.max(board.scrollWidth, 1), availH / Math.max(board.scrollHeight, 1)) * 0.96;
-    board.style.transformOrigin = "center center";
-    board.style.transform = `scale(${scale})`;
-    requestAnimationFrame(() => drawChampionPathChain(board));
+    const mobile = window.innerWidth <= 720;
+    const availH = Math.max(260, window.innerHeight * (mobile ? 0.52 : 0.62));
+    fitBracketBoard(fit, board, {
+      pad: mobile ? 0.84 : 0.94,
+      maxAvailH: availH,
+    });
   };
   requestAnimationFrame(() => {
     el.classList.add("is-on");
@@ -2300,7 +2707,7 @@ function openShareBracket(state) {
   const qrCanvas = el.querySelector("#share-qr-canvas");
   if (qrCanvas) {
     QRCode.toCanvas(qrCanvas, SITE_URL, {
-      width: 132,
+      width: 66,
       margin: 1,
       color: { dark: "#111110", light: "#ffffff" },
       errorCorrectionLevel: "M",
@@ -2321,304 +2728,263 @@ function openShareBracket(state) {
     if (e.target === el) close();
   });
 
-  el.querySelector("#share-save-btn").addEventListener("click", async () => {
-    const btn = el.querySelector("#share-save-btn");
-    btn.disabled = true;
-    btn.textContent = "生成中…";
-    try {
-      await downloadShareCard(state);
-      btn.textContent = "已保存";
-    } catch {
-      btn.textContent = "请直接截图";
+  const cardEl = el.querySelector("#battle-card");
+  const shareBtn = el.querySelector("#share-go-btn");
+  const shareLabel = shareBtn?.querySelector("span");
+  const saveBtn = el.querySelector("#share-save-btn");
+  /** @type {{ file: File, title: string, text: string } | null} */
+  let shareReady = null;
+  if (shareBtn && shareLabel) {
+    shareBtn.disabled = true;
+    shareBtn.classList.add("is-busy");
+    shareLabel.textContent = "准备中…";
+  }
+  if (saveBtn) {
+    saveBtn.disabled = true;
+    saveBtn.classList.add("is-busy");
+  }
+
+  const setShareReady = (ready) => {
+    shareReady = ready;
+    if (shareBtn && shareLabel) {
+      shareBtn.disabled = false;
+      shareBtn.classList.remove("is-busy", "is-fail");
+      shareLabel.textContent = "分享";
     }
-    setTimeout(() => {
-      btn.disabled = false;
-      btn.textContent = "保存图片";
-    }, 1600);
+    if (saveBtn) {
+      saveBtn.disabled = false;
+      saveBtn.classList.remove("is-busy");
+      saveBtn.textContent = "保存照片";
+    }
+  };
+
+  const setShareFail = () => {
+    if (shareBtn && shareLabel) {
+      shareBtn.disabled = false;
+      shareBtn.classList.remove("is-busy");
+      shareBtn.classList.add("is-fail");
+      shareLabel.textContent = "失败重试";
+    }
+    if (saveBtn) {
+      saveBtn.disabled = false;
+      saveBtn.classList.remove("is-busy");
+      saveBtn.textContent = "重试生成";
+    }
+  };
+
+  const prepShare = (async () => prepareNativeSharePayload(state))()
+    .then(setShareReady)
+    .catch(setShareFail);
+
+  const downloadShareFile = (file) => {
+    const url = URL.createObjectURL(file);
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = file.name || "HeipaClub-Bracket.jpg";
+    a.rel = "noopener";
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+    setTimeout(() => URL.revokeObjectURL(url), 2500);
+  };
+
+  saveBtn?.addEventListener("click", async () => {
+    if (!shareReady) {
+      saveBtn.disabled = true;
+      saveBtn.classList.add("is-busy");
+      saveBtn.textContent = "准备中…";
+      try {
+        setShareReady(await prepareNativeSharePayload(state));
+      } catch {
+        setShareFail();
+        return;
+      }
+    }
+    if (!shareReady?.file) return;
+    try {
+      downloadShareFile(shareReady.file);
+      saveBtn.textContent = "已保存";
+      saveBtn.classList.add("is-ok");
+      setTimeout(() => {
+        if (saveBtn.isConnected) {
+          saveBtn.textContent = "保存照片";
+          saveBtn.classList.remove("is-ok");
+        }
+      }, 1600);
+    } catch {
+      saveBtn.textContent = "保存失败";
+      setTimeout(() => {
+        if (saveBtn.isConnected) saveBtn.textContent = "保存照片";
+      }, 1400);
+    }
+  });
+
+  shareBtn?.addEventListener("click", () => {
+    // Must call navigator.share() synchronously in this click stack (iOS Safari).
+    if (!shareReady) {
+      shareBtn.disabled = true;
+      shareBtn.classList.add("is-busy");
+      shareBtn.classList.remove("is-fail");
+      if (shareLabel) shareLabel.textContent = "准备中…";
+      if (saveBtn) {
+        saveBtn.disabled = true;
+        saveBtn.classList.add("is-busy");
+      }
+      prepareNativeSharePayload(state)
+        .then(setShareReady)
+        .catch(setShareFail);
+      return;
+    }
+    if (typeof navigator.share !== "function") {
+      if (shareLabel) shareLabel.textContent = "请用系统分享";
+      setTimeout(() => {
+        if (shareLabel) shareLabel.textContent = "分享";
+      }, 1400);
+      return;
+    }
+    const full = {
+      files: [shareReady.file],
+      title: shareReady.title,
+      text: shareReady.text,
+    };
+    const filesOnly = { files: [shareReady.file] };
+    const payload =
+      typeof navigator.canShare === "function"
+        ? navigator.canShare(full)
+          ? full
+          : navigator.canShare(filesOnly)
+            ? filesOnly
+            : null
+        : full;
+    if (!payload) {
+      if (shareLabel) shareLabel.textContent = "暂不支持分享";
+      setTimeout(() => {
+        if (shareLabel) shareLabel.textContent = "分享";
+      }, 1400);
+      return;
+    }
+    navigator.share(payload).catch((e) => {
+      if (e?.name === "AbortError") return;
+      if (shareLabel) {
+        shareLabel.textContent = "分享失败";
+        setTimeout(() => {
+          shareLabel.textContent = "分享";
+        }, 1400);
+      }
+    });
+  });
+}
+/** Prefetch File for Web Share API — Music Cup style Canvas draw (fast + crisp). */
+async function prepareNativeSharePayload(state) {
+  const { champion } = podiumFromBracket(state.bracket);
+  const title = `${state.artistName || ""} 本命曲对阵图`;
+  const textBody = `冠军：${champion?.title || ""} · 扫码玩 heipaclub.com`;
+  const blob = await buildShareCardBlob(state);
+  const file = new File([blob], "HeipaClub-Bracket.jpg", {
+    type: blob.type || "image/jpeg",
+  });
+  return { file, title, text: textBody };
+}
+
+/** @deprecated */
+async function downloadShareCard(state) {
+  const payload = await prepareNativeSharePayload(state);
+  await shareOrDownloadBlob(payload.file, "HeipaClub-Bracket.jpg", {
+    title: payload.title,
+    text: payload.text,
   });
 }
 
-/** Draw a shareable PNG card — portrait bracket for mobile WeChat shares. */
-async function downloadShareCard(state) {
-  const { champion } = podiumFromBracket(state.bracket);
-  const W = 1080;
-  const H = 1920;
-  const canvas = document.createElement("canvas");
-  canvas.width = W;
-  canvas.height = H;
-  const ctx = canvas.getContext("2d");
+function isLikelyMobileShareClient() {
+  const ua = navigator.userAgent || "";
+  if (/iPhone|iPad|iPod|Android/i.test(ua)) return true;
+  // iPadOS desktop UA
+  if (navigator.maxTouchPoints > 1 && /Macintosh/i.test(ua)) return true;
+  return false;
+}
 
-  const g = ctx.createLinearGradient(0, 0, W, H);
-  g.addColorStop(0, "#eceae4");
-  g.addColorStop(1, "#d2cec6");
-  ctx.fillStyle = g;
-  ctx.fillRect(0, 0, W, H);
-
-  ctx.fillStyle = "#111110";
-  ctx.font = "600 28px Noto Sans SC, sans-serif";
-  ctx.fillText("黑怕巅峰对决", 64, 78);
-  ctx.font = "400 30px Noto Sans SC, sans-serif";
-  ctx.fillStyle = "#5c5a55";
-  ctx.fillText(`${state.artistName} · 冠军诞生`, 64, 122);
-
-  // champion banner (compact)
-  ctx.fillStyle = "#b8ff1a";
-  roundRect(ctx, 64, 150, W - 128, 200, 16);
-  ctx.fill();
-  ctx.fillStyle = "#111110";
-  ctx.font = "700 36px Bebas Neue, sans-serif";
-  ctx.fillText("CHAMPION", 96, 210);
-  ctx.font = "700 56px Noto Sans SC, sans-serif";
-  const champTitle = champion?.title || "";
-  ctx.fillStyle = "#c9a227";
-  ctx.fillText(champTitle.length > 12 ? `${champTitle.slice(0, 12)}…` : champTitle, 96, 280);
-  ctx.font = "600 24px Noto Sans SC, sans-serif";
-  ctx.fillStyle = "#a67c00";
-  ctx.fillText(metaLine(champion) || state.artistName, 96, 320);
-
-  ctx.fillStyle = "#111110";
-  ctx.font = "700 28px Noto Sans SC, sans-serif";
-  ctx.fillText("夺冠对阵图", 64, 400);
-  ctx.fillStyle = "#5c5a55";
-  ctx.font = "400 20px Noto Sans SC, sans-serif";
-  ctx.fillText("8强 → 决赛（晋级高亮）", 64, 432);
-
-  drawPortraitShareBracket(ctx, state.bracket, champion, 40, 460, W - 80, 1180);
-
-  // QR → heipaclub.com
-  const qrSize = 160;
-  const qrDataUrl = await QRCode.toDataURL(SITE_URL, {
-    width: qrSize,
-    margin: 1,
-    color: { dark: "#111110", light: "#ffffff" },
-    errorCorrectionLevel: "M",
-  });
-  const qrImg = await loadImageFromUrl(qrDataUrl);
-  const qrX = 64;
-  const qrY = H - 230;
-  ctx.fillStyle = "#ffffff";
-  roundRect(ctx, qrX - 10, qrY - 10, qrSize + 20, qrSize + 20, 12);
-  ctx.fill();
-  ctx.drawImage(qrImg, qrX, qrY, qrSize, qrSize);
-
-  ctx.fillStyle = "#111110";
-  ctx.font = "italic 800 34px Bebas Neue, Noto Sans SC, sans-serif";
-  const siteX = qrX + qrSize + 32;
-  ctx.fillText("HEIPA", siteX, qrY + 48);
-  const heipaW = ctx.measureText("HEIPA").width;
-  const clubGrad = ctx.createLinearGradient(siteX + heipaW, 0, siteX + heipaW + 90, 0);
-  clubGrad.addColorStop(0, "#5a7a12");
-  clubGrad.addColorStop(0.55, "#7a9a1e");
-  clubGrad.addColorStop(1, "#8aab28");
-  ctx.fillStyle = clubGrad;
-  ctx.fillText("CLUB", siteX + heipaW, qrY + 48);
-  const clubW = ctx.measureText("CLUB").width;
-  ctx.fillStyle = "#111110";
-  ctx.fillText(".COM", siteX + heipaW + clubW, qrY + 48);
-  const comW = ctx.measureText(".COM").width;
-  ctx.fillStyle = "#5a6e22";
-  ctx.font = "italic 700 16px Bebas Neue, Noto Sans SC, sans-serif";
-  ctx.fillText("z", siteX + heipaW + clubW + comW + 4, qrY + 42);
-
-  ctx.fillStyle = "#5c5a55";
-  ctx.font = "400 20px Noto Sans SC, sans-serif";
-  const slogan = "给你的本命 RapStar 办一场真正的说唱巅峰对决";
-  const sloganMax = W - siteX - 48;
-  // wrap slogan to 2 lines if needed
-  if (ctx.measureText(slogan).width <= sloganMax) {
-    ctx.fillText(slogan, siteX, qrY + 92);
-  } else {
-    const mid = Math.floor(slogan.length / 2);
-    let split = slogan.lastIndexOf(" ", mid);
-    if (split < 8) split = mid;
-    ctx.fillText(slogan.slice(0, split).trim(), siteX, qrY + 86);
-    ctx.fillText(slogan.slice(split).trim(), siteX, qrY + 114);
-  }
-
-  ctx.fillStyle = "#5c5a55";
-  ctx.font = "400 20px Noto Sans SC, sans-serif";
-  ctx.fillText(`${state.bracket.size} 强 · ${progressText(state.bracket)}`, 64, H - 36);
-
-  const blob = await new Promise((resolve, reject) => {
-    try {
-      canvas.toBlob((b) => (b ? resolve(b) : reject(new Error("toBlob failed"))), "image/png");
-    } catch (err) {
-      reject(err);
+async function blobToJpeg(blob, quality = 0.72) {
+  if (blob.type === "image/jpeg" && quality >= 0.85) return blob;
+  const bitmap = await createImageBitmap(blob);
+  try {
+    let w = bitmap.width;
+    let h = bitmap.height;
+    // Cap long edge so share stays ~hundreds of KB
+    const maxEdge = 1280;
+    if (Math.max(w, h) > maxEdge) {
+      const s = maxEdge / Math.max(w, h);
+      w = Math.round(w * s);
+      h = Math.round(h * s);
     }
-  });
-
-  const fileName = `${state.artistName}-本命曲对阵图.png`;
-  if (navigator.share && navigator.canShare) {
-    const file = new File([blob], fileName, { type: "image/png" });
-    if (navigator.canShare({ files: [file] })) {
-      try {
-        await navigator.share({
-          files: [file],
-          title: `${state.artistName} 本命曲对阵图`,
-          text: `冠军：${champion?.title || ""} · 扫码玩 heipaclub.com`,
-        });
-        return;
-      } catch {
-        /* fall through */
-      }
-    }
+    const canvas = document.createElement("canvas");
+    canvas.width = w;
+    canvas.height = h;
+    const ctx = canvas.getContext("2d");
+    ctx.fillStyle = "#e4e1da";
+    ctx.fillRect(0, 0, w, h);
+    ctx.drawImage(bitmap, 0, 0, w, h);
+    const jpeg = await new Promise((resolve, reject) => {
+      canvas.toBlob((b) => (b ? resolve(b) : reject(new Error("jpeg failed"))), "image/jpeg", quality);
+    });
+    return jpeg;
+  } finally {
+    bitmap.close?.();
   }
-
-  const url = URL.createObjectURL(blob);
-  const a = document.createElement("a");
-  a.href = url;
-  a.download = fileName;
-  a.click();
-  URL.revokeObjectURL(url);
 }
 
 /**
- * Mobile-first portrait bracket: from ≤8强 to 决赛, left | center | right
- * (same structure as on-site 对阵图, text chips — no remote art / CORS).
+ * Open the OS share sheet with an image file.
+ * Must be called directly from a user gesture on iOS Safari.
  */
-function drawPortraitShareBracket(ctx, bracket, champ, x, y, w, h) {
-  const rounds = bracket?.rounds || [];
-  if (!rounds.length) return;
-  const size = bracket.size || 32;
-
-  let startRi = 0;
-  for (let ri = 0; ri < rounds.length; ri++) {
-    if (size / 2 ** ri <= 8) {
-      startRi = ri;
-      break;
+async function invokeNativeShare({ file, title = "", text = "" }) {
+  if (typeof navigator.share !== "function") {
+    throw new Error("Web Share API unavailable");
+  }
+  const data = { files: [file], title, text };
+  if (typeof navigator.canShare === "function" && !navigator.canShare(data)) {
+    // Retry files-only — some WebViews reject title/text + files together
+    const filesOnly = { files: [file] };
+    if (!navigator.canShare(filesOnly)) {
+      throw new Error("canShare files unsupported");
+    }
+    await navigator.share(filesOnly);
+    return;
+  }
+  try {
+    await navigator.share(data);
+  } catch (e) {
+    if (e?.name === "AbortError") return;
+    // One more try without title/text
+    try {
+      await navigator.share({ files: [file] });
+    } catch (e2) {
+      if (e2?.name === "AbortError") return;
+      throw e2;
     }
   }
+}
 
-  const feederRis = [];
-  for (let ri = startRi; ri < rounds.length - 1; ri++) feederRis.push(ri);
-  const finalRi = rounds.length - 1;
-  const leftCols = feederRis.length;
-  const colCount = Math.max(1, leftCols * 2 + 1);
-  const colW = w / colCount;
-  const pad = 6;
-  const chipW = Math.max(100, colW - pad * 2);
-  const chipH = 40;
-  const matchH = chipH * 2 + 8;
-
-  /** @type {{ id: string, col: number, mx: number, my: number, m: object }[]} */
-  const placed = [];
-
-  function planColumn(matches, colIndex, label) {
-    const colX = x + colIndex * colW + (colW - chipW) / 2;
-    ctx.fillStyle = "#5c5a55";
-    ctx.font = "700 18px Noto Sans SC, sans-serif";
-    ctx.textAlign = "center";
-    ctx.fillText(label, colX + chipW / 2, y + 22);
-    ctx.textAlign = "left";
-
-    const n = Math.max(matches.length, 1);
-    const usable = h - 52;
-    const step = usable / n;
-    matches.forEach((m, i) => {
-      const my = y + 44 + i * step + (step - matchH) / 2;
-      placed.push({ id: m.id, col: colIndex, mx: colX, my, m });
-    });
-  }
-
-  feederRis.forEach((ri, ci) => {
-    const round = rounds[ri] || [];
-    const mid = Math.ceil(round.length / 2);
-    planColumn(round.slice(0, mid), ci, shortRoundLabel(size, ri));
-  });
-
-  const finalMatch = rounds[finalRi]?.[0];
-  if (finalMatch) {
-    planColumn([finalMatch], leftCols, shortRoundLabel(size, finalRi));
-  }
-
-  feederRis.forEach((ri, ci) => {
-    const round = rounds[ri] || [];
-    const mid = Math.ceil(round.length / 2);
-    planColumn(round.slice(mid), colCount - 1 - ci, shortRoundLabel(size, ri));
-  });
-
-  const byId = new Map(placed.map((p) => [p.id, p]));
-
-  // lines under chips
-  for (let ri = startRi; ri < finalRi; ri++) {
-    for (const parent of rounds[ri + 1] || []) {
-      if (!parent?.from) continue;
-      const p = byId.get(parent.id);
-      if (!p) continue;
-      const pCx = p.mx + chipW / 2;
-      const pCy = p.my + matchH / 2;
-      for (const fromId of parent.from) {
-        const c = byId.get(fromId);
-        if (!c) continue;
-        const fromMatch = (rounds[ri] || []).find((mm) => mm.id === fromId);
-        const onPath = Boolean(
-          champ && fromMatch?.winner && isSameSong(fromMatch.winner, champ)
-        );
-        ctx.strokeStyle = onPath ? "rgba(120, 160, 20, 0.9)" : "rgba(17,17,16,0.18)";
-        ctx.lineWidth = onPath ? 3 : 1.5;
-        ctx.beginPath();
-        const cCx = c.mx + chipW / 2;
-        const cCy = c.my + matchH / 2;
-        const midX = (cCx + pCx) / 2;
-        ctx.moveTo(cCx, cCy);
-        ctx.bezierCurveTo(midX, cCy, midX, pCy, pCx, pCy);
-        ctx.stroke();
-      }
+async function shareOrDownloadBlob(blob, fileName, { title = "", text = "" } = {}) {
+  try {
+    const jpeg = await blobToJpeg(blob).catch(() => blob);
+    const type = jpeg.type || "image/jpeg";
+    const ext = type.includes("png") ? "png" : "jpg";
+    const file = new File([jpeg], `HeipaClub-Bracket.${ext}`, { type });
+    await invokeNativeShare({ file, title, text });
+    return;
+  } catch (e) {
+    if (e?.name === "AbortError") return;
+    // Mobile: never fake a download click — that triggers Safari's ugly prompt.
+    if (isLikelyMobileShareClient()) {
+      throw e;
     }
   }
-
-  for (const p of placed) {
-    drawShareMatchChips(ctx, p.m, champ, p.mx, p.my, chipW, chipH);
-  }
-}
-
-function drawShareMatchChips(ctx, m, champ, x, y, w, chipH) {
-  drawShareSongChip(ctx, m?.a, champ, x, y, w, chipH);
-  drawShareSongChip(ctx, m?.b, champ, x, y + chipH + 6, w, chipH);
-}
-
-function drawShareSongChip(ctx, song, champ, x, y, w, h) {
-  const onPath = Boolean(song && champ && isSameSong(song, champ));
-  ctx.fillStyle = onPath ? "#b8ff1a" : "rgba(255,255,255,0.92)";
-  roundRect(ctx, x, y, w, h, 8);
-  ctx.fill();
-  if (onPath) {
-    ctx.strokeStyle = "#111110";
-    ctx.lineWidth = 2;
-    roundRect(ctx, x, y, w, h, 8);
-    ctx.stroke();
-  }
-  ctx.fillStyle = "#111110";
-  ctx.font = `${onPath ? "700" : "500"} 16px Noto Sans SC, sans-serif`;
-  const title = song?.title || "—";
-  ctx.fillText(clipCanvasText(ctx, title, w - 16), x + 8, y + h / 2 + 5);
-}
-
-function clipCanvasText(ctx, text, maxW) {
-  if (ctx.measureText(text).width <= maxW) return text;
-  let t = String(text);
-  while (t.length > 1 && ctx.measureText(`${t}…`).width > maxW) t = t.slice(0, -1);
-  return `${t}…`;
-}
-
-function loadImageFromUrl(url) {
-  return new Promise((resolve, reject) => {
-    const img = new Image();
-    img.onload = () => resolve(img);
-    img.onerror = () => reject(new Error("qr image load failed"));
-    img.src = url;
-  });
-}
-
-function roundRect(ctx, x, y, w, h, r) {
-  const rr = Math.min(r, w / 2, h / 2);
-  ctx.beginPath();
-  ctx.moveTo(x + rr, y);
-  ctx.arcTo(x + w, y, x + w, y + h, rr);
-  ctx.arcTo(x + w, y + h, x, y + h, rr);
-  ctx.arcTo(x, y + h, x, y, rr);
-  ctx.arcTo(x, y, x + w, y, rr);
-  ctx.closePath();
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement("a");
+  a.href = url;
+  a.download = fileName || "HeipaClub-Bracket.png";
+  a.click();
+  URL.revokeObjectURL(url);
 }
 
 function pickButton(side, song, fallback) {
@@ -2649,6 +3015,8 @@ function renderChamp(state) {
   const avatar = state.artistAvatar || "";
   const { runnerUp, semis } = podiumFromBracket(state.bracket);
 
+  void warmShareCovers(state);
+
   app.innerHTML = shell(
     `
     <section class="champ champ-cup">
@@ -2659,7 +3027,9 @@ function renderChamp(state) {
             : state.artistName || ""
         )}</span></p>
         <p class="champ-cup-born">冠军诞生</p>
-        <p class="champ-cup-brand">黑怕巅峰对决</p>
+        <p class="champ-cup-brand brand-wordmark" aria-label="黑怕巅峰对决">
+          <span class="brand-heipa">黑怕</span><span class="brand-duel">巅峰对决</span>
+        </p>
         <p class="champ-cup-champion-word">C H A M P I O N</p>
         <div class="champ-cup-cover-wrap">
           ${imgTag(coverUrl(c, avatar), { alt: c.title, className: "champ-cup-cover" })}

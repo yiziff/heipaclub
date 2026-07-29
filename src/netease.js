@@ -59,6 +59,24 @@ export async function searchArtist(keyword) {
   }));
 }
 
+function mapNeteaseSong(s) {
+  const pic = s.al?.picUrl || "";
+  const publishMs = Number(s.publishTime || s.al?.publishTime || 0) || 0;
+  return {
+    id: String(s.id),
+    neteaseId: String(s.id),
+    title: s.name,
+    artist: (s.ar || []).map((x) => x.name).join(", "),
+    album: s.al?.name || "",
+    collection: s.al?.name || "",
+    cover: hiRes(pic, 500),
+    coverSm: hiRes(pic, 200),
+    duration_ms: s.dt ?? null,
+    year: publishYear(publishMs),
+    publishTime: publishMs || null,
+  };
+}
+
 /**
  * Hot top-N songs for an artist.
  * Use /artist/top/song (same ranking as NetEase app「热门」),
@@ -68,53 +86,81 @@ export async function searchArtist(keyword) {
 export async function artistTopSongs(artistId, limit = 50) {
   const data = await getJson("/artist/top/song", { id: artistId });
   const songs = data?.songs || data?.hotSongs || [];
-  const mapped = songs.map((s) => {
-    const pic = s.al?.picUrl || "";
-    const publishMs = Number(s.publishTime || s.al?.publishTime || 0) || 0;
-    const year = publishYear(publishMs);
-    return {
-      id: String(s.id),
-      neteaseId: String(s.id),
-      title: s.name,
-      artist: (s.ar || []).map((x) => x.name).join(", "),
-      album: s.al?.name || "",
-      collection: s.al?.name || "",
-      cover: hiRes(pic, 500),
-      coverSm: hiRes(pic, 200),
-      duration_ms: s.dt ?? null,
-      year,
-      publishTime: publishMs || null,
-    };
+  const mapped = songs.map(mapNeteaseSong);
+
+  // 年份缺省不再阻塞开赛：/song/detail 二次往返往往是卡住主因之一
+  return dedupeByTitleKeepHotter(mapped).slice(0, limit);
+}
+
+/**
+ * Paginated artist songs (deeper than top/song ≈50).
+ * order: hot | time
+ */
+export async function artistSongsPage(artistId, { order = "hot", offset = 0, limit = 100 } = {}) {
+  const data = await getJson("/artist/songs", {
+    id: artistId,
+    order,
+    offset,
+    limit,
   });
+  const raw = data?.songs || [];
+  return {
+    songs: raw.map(mapNeteaseSong),
+    more: Boolean(data?.more),
+    total: Number(data?.total) || raw.length,
+  };
+}
 
-  const deduped = dedupeByTitleKeepHotter(mapped).slice(0, limit);
+/** Keep existing order; append newcomers (title-deduped). */
+export function mergeSongPools(existing, incoming) {
+  return dedupeByTitleKeepHotter([...(existing || []), ...(incoming || [])]);
+}
 
-  const missing = deduped.filter((s) => !s.year).map((s) => s.id);
-  if (missing.length) {
-    try {
-      const detail = await getJson("/song/detail", { ids: missing.join(",") });
-      const byId = new Map((detail?.songs || []).map((s) => [String(s.id), s]));
-      for (const song of deduped) {
-        if (song.year) continue;
-        const raw = byId.get(song.id);
-        if (!raw) continue;
-        const ms = Number(raw.publishTime || raw.al?.publishTime || 0) || 0;
-        const y = publishYear(ms);
-        if (y) {
-          song.year = y;
-          song.publishTime = ms;
-        }
-        if (!song.album && raw.al?.name) {
-          song.album = raw.al.name;
-          song.collection = raw.al.name;
-        }
-      }
-    } catch {
-      /* keep partial meta */
-    }
+/**
+ * Expand pool beyond cached Top50.
+ * @param {"top100"|"all"} target
+ * @returns {{ songs: any[], stage: "top100"|"all", added: number }}
+ */
+export async function expandArtistPool(existingSongs, artistId, target = "top100") {
+  const id = String(artistId || "").trim();
+  if (!/^\d+$/.test(id)) throw new Error("invalid artist id");
+
+  const base = Array.isArray(existingSongs) ? [...existingSongs] : [];
+
+  if (target === "top100") {
+    const page = await artistSongsPage(id, { order: "hot", offset: 0, limit: 100 });
+    const merged = mergeSongPools(base, page.songs).slice(0, 100);
+    return {
+      songs: merged,
+      stage: "top100",
+      added: Math.max(0, merged.length - base.length),
+      total: page.total,
+      more: page.more || merged.length < (page.total || 0),
+    };
   }
 
-  return deduped;
+  // all: page through until exhausted (cap pages to avoid runaway)
+  let offset = 0;
+  const pageSize = 100;
+  let more = true;
+  let total = 0;
+  let incoming = [];
+  for (let page = 0; page < 30 && more; page++) {
+    const chunk = await artistSongsPage(id, { order: "hot", offset, limit: pageSize });
+    total = chunk.total || total;
+    incoming = incoming.concat(chunk.songs);
+    more = chunk.more && chunk.songs.length > 0;
+    offset += pageSize;
+    if (!chunk.songs.length) break;
+  }
+  const merged = mergeSongPools(base, incoming);
+  return {
+    songs: merged,
+    stage: "all",
+    added: Math.max(0, merged.length - base.length),
+    total: total || merged.length,
+    more: false,
+  };
 }
 
 /** Normalize title for dedupe: strip feat/parens, case/space/punct. */
@@ -124,7 +170,7 @@ function titleDedupeKey(title) {
     .replace(/\s*[\(（][^）)]*[\)）]\s*/g, " ")
     .replace(/\s*(?:feat\.?|ft\.?|with)\s+.+$/i, "")
     .replace(/\s+/g, "")
-    .replace(/[·．._\-#（）()]/g, "")
+    .replace(/[·．._\-#（）()']/g, "")
     .trim();
 }
 
@@ -186,14 +232,20 @@ export async function loadArtistCup(catalogArtist, { limit = 50 } = {}) {
   if (!best) {
     throw new Error(`找不到歌手：${catalogArtist.name}`);
   }
-  // refresh avatar if missing
-  if (!best.avatar) {
-    const hits = await searchArtist(catalogArtist.search || catalogArtist.name);
-    const matched =
-      hits.find((h) => String(h.id) === String(best.id)) || hits[0];
-    if (matched?.avatar) best.avatar = matched.avatar;
-  }
-  const songs = await artistTopSongs(best.id, limit);
+
+  // 热门与补头像并行，少一次串行等待
+  const songsPromise = artistTopSongs(best.id, limit);
+  const avatarPromise = best.avatar
+    ? Promise.resolve(best.avatar)
+    : searchArtist(catalogArtist.search || catalogArtist.name)
+        .then((hits) => {
+          const matched =
+            hits.find((h) => String(h.id) === String(best.id)) || hits[0];
+          return matched?.avatar || "";
+        })
+        .catch(() => "");
+
+  const [songs, avatar] = await Promise.all([songsPromise, avatarPromise]);
   if (!songs.length) {
     throw new Error(`未拉到热门歌曲：${best.name}`);
   }
@@ -201,7 +253,7 @@ export async function loadArtistCup(catalogArtist, { limit = 50 } = {}) {
     ...catalogArtist,
     neteaseArtistId: best.id,
     neteaseArtistName: best.name,
-    avatar: best.avatar || catalogArtist.avatar || "",
+    avatar: avatar || best.avatar || catalogArtist.avatar || "",
     songs,
   };
 }

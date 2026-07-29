@@ -13,7 +13,8 @@
     "db:init": "npx wrangler d1 execute heipaclub-rank --remote --file=./schema.sql",
     "db:init:local": "npx wrangler d1 execute heipaclub-rank --local --file=./schema.sql",
     "enrich": "node scripts/enrich-artwork.mjs",
-    "roster": "node scripts/build-roster.mjs && node scripts/rebuild-from-cache.mjs"
+    "roster": "node scripts/build-roster.mjs && node scripts/rebuild-from-cache.mjs",
+    "hot-tops": "node scripts/build-hot-tops.mjs"
   },
   "devDependencies": {
     "@cloudflare/vite-plugin": "^1.47.0",
