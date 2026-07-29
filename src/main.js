@@ -1986,10 +1986,12 @@ function patchPlaySourceInBracket(bracket, song) {
 
 async function ensureSongPlaySource(state, song) {
   if (!song) return song;
-  if (song.playSource === "itunes" || song.playSource === "netease") return song;
-  const aliases = [state.artistSearch, state.artistName].filter(Boolean);
+  // 已确认 Apple 试听则复用；标成 netease 时仍再试一次 iTunes（避免误判锁死）
+  if (song.playSource === "itunes" && song.previewUrl) return song;
+  const aliases = [state.artistSearch, state.artistName, song.rosterArtistName].filter(Boolean);
   const resolved = await resolvePlaySource(song, state.artistName, {
     artistAliases: aliases,
+    bypassCache: song.playSource === "netease",
   });
   const nextBracket = patchPlaySourceInBracket(state.bracket, resolved);
   const next = { ...state, bracket: nextBracket };
@@ -3061,7 +3063,11 @@ function renderChamp(state) {
   bindBack();
 
   const player = createPlayer(document.getElementById("player-mount"));
-  player.load(c, { autoplay: false });
+  player.load(c, {
+    autoplay: false,
+    artistName: c.rosterArtistName || state.artistName || "",
+    artistAliases: [state.artistSearch, c.rosterArtistName].filter(Boolean),
+  });
   document.getElementById("cup-player").hidden = false;
 
   // still report wins silently
@@ -3223,7 +3229,11 @@ async function renderRank(tab = "songs") {
                 cover: btn.dataset.cover,
                 neteaseId: btn.dataset.songId,
               },
-              { autoplay: true }
+              {
+                autoplay: true,
+                artistName: btn.dataset.artist || "",
+                artistAliases: [btn.dataset.artist].filter(Boolean),
+              }
             );
           });
         });

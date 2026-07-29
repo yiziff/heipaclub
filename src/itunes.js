@@ -372,7 +372,7 @@ export async function resolvePlaySource(
     return { ...song, playSource: "netease", previewUrl: song?.previewUrl || "" };
   }
 
-  const cacheKey = `v2|${norm(artists.slice(0, 6).join(","))}|${norm(titleCore(title))}`;
+  const cacheKey = `v3|${norm(artists.slice(0, 6).join(","))}|${norm(titleCore(title))}`;
   if (!bypassCache && playSourceCache.has(cacheKey)) {
     const hit = playSourceCache.get(cacheKey);
     return { ...song, ...hit };
@@ -381,8 +381,29 @@ export async function resolvePlaySource(
   let best = null;
   let bestScore = 0;
 
+  const consider = (t, artistBoost = 0) => {
+    if (!t?.previewUrl || !t.trackName) return;
+    const ts = titleScore(title, t.trackName);
+    const as = Math.max(
+      ...artists.map((a) => nameScore(a, t.artistName || "")),
+      artistBoost,
+      0
+    );
+    // Title must be strong; artist soft-match OR exact title with any credit overlap
+    if (ts < 85) return;
+    if (as < 60 && ts < 100) return;
+    if (as < 40) return;
+    const score = ts * 0.7 + Math.max(as, 40) * 0.3;
+    if (score > bestScore) {
+      bestScore = score;
+      best = t;
+    }
+  };
+
+  const album = String(song?.album || song?.collection || "").trim();
   const searchTerms = [
     ...artists.slice(0, 4).map((a) => [a, titleCore(title)].join(" ").trim()),
+    album ? [artists[0], album, titleCore(title)].filter(Boolean).join(" ").trim() : "",
     titleCore(title),
   ].filter((t, i, arr) => t && arr.indexOf(t) === i);
 
@@ -392,29 +413,44 @@ export async function resolvePlaySource(
         const data = await itunesGet("/search", {
           term,
           entity: "song",
-          limit: 12,
+          limit: 16,
           country,
         });
-        for (const t of data?.results || []) {
-          if (!t?.previewUrl || !t.trackName) continue;
-          const ts = titleScore(title, t.trackName);
-          const as = Math.max(...artists.map((a) => nameScore(a, t.artistName || "")), 0);
-          // Title must be strong; artist soft-match OR exact title with any credit overlap
-          if (ts < 85) continue;
-          if (as < 60 && ts < 100) continue;
-          if (as < 40) continue;
-          const score = ts * 0.7 + Math.max(as, 40) * 0.3;
-          if (score > bestScore) {
-            bestScore = score;
-            best = t;
-          }
-        }
+        for (const t of data?.results || []) consider(t);
         if (best && bestScore >= 95) break;
       } catch {
         /* try next storefront */
       }
     }
     if (best && bestScore >= 95) break;
+  }
+
+  // 搜索常漏中文说唱：用艺人 lookup 扫曲库再比歌名（如 Asen / Celebrate）
+  if (!best || bestScore < 95) {
+    const artistIds = new Set();
+    if (song?.itunesArtistId) artistIds.add(String(song.itunesArtistId));
+    for (const name of artists.slice(0, 4)) {
+      try {
+        const hits = await searchArtist(name, { limit: 4, countries });
+        for (const h of hits.slice(0, 2)) {
+          if (h?.id) artistIds.add(String(h.id));
+        }
+      } catch {
+        /* skip */
+      }
+    }
+    for (const id of [...artistIds].slice(0, 4)) {
+      for (const country of countries) {
+        try {
+          const tracks = await lookupSongs(id, country, 80);
+          for (const t of tracks) consider(t, 70);
+          if (best && bestScore >= 95) break;
+        } catch {
+          /* skip */
+        }
+      }
+      if (best && bestScore >= 95) break;
+    }
   }
 
   let patch;
@@ -437,9 +473,6 @@ export async function resolvePlaySource(
   return { ...song, ...patch };
 }
 
-/**
- * Enrich a field with playSource. Concurrency capped for iTunes rate.
- */
 export async function enrichSongsPlaySource(
   songs,
   artistName,

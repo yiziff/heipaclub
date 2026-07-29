@@ -1,5 +1,5 @@
 /**
- * Hybrid player: iTunes previewUrl first, NetEase api-enhanced fallback.
+ * Hybrid player: ALWAYS try iTunes first, NetEase only as fallback.
  */
 
 import { neteaseSongPage, songPlayUrl } from "./netease.js";
@@ -13,7 +13,9 @@ function fmt(sec) {
 }
 
 function sourceLabel(song) {
-  if (song?.playSource === "itunes" || song?.previewUrl) return "Apple 试听 · 约 30 秒";
+  if (song?.playSource === "itunes" || (song?.previewUrl && song?.playSource !== "netease")) {
+    return "Apple 试听 · 约 30 秒";
+  }
   return "网易云播放";
 }
 
@@ -54,6 +56,7 @@ export function createPlayer(root) {
   const hint = root.querySelector("#cup-hint");
 
   let current = null;
+  let lastLoadOpts = {};
   let seeking = false;
   /** Bump to cancel in-flight load()/play() after stop or newer load. */
   let loadSeq = 0;
@@ -85,7 +88,9 @@ export function createPlayer(root) {
       cover.classList.add("empty");
     }
 
-    const useItunes = song.playSource === "itunes" || Boolean(song.previewUrl);
+    const useItunes =
+      song.playSource === "itunes" ||
+      (Boolean(song.previewUrl) && song.playSource !== "netease");
     if (useItunes && song.trackViewUrl) {
       openLink.href = song.trackViewUrl;
       openLink.textContent = "在 Apple Music 打开";
@@ -99,25 +104,27 @@ export function createPlayer(root) {
     }
   }
 
+  /**
+   * Pick play URL. Rule: iTunes preview first; NetEase only if no Apple preview.
+   * Caller must run resolvePlaySource before this when itunes is not yet confirmed.
+   */
   async function resolveUrl(song) {
-    const preferItunes =
-      song?.playSource === "itunes" ||
-      (Boolean(song?.previewUrl) && song?.playSource !== "netease");
-    if (preferItunes && song.previewUrl) {
+    if (song?.playSource === "itunes" && song.previewUrl) {
+      return { url: song.previewUrl, via: "itunes", song };
+    }
+    if (song?.previewUrl && song?.playSource !== "netease") {
       return { url: song.previewUrl, via: "itunes", song };
     }
     if (song?.neteaseId) {
       const url = await songPlayUrl(song.neteaseId);
       if (url) return { url, via: "netease", song };
     }
-    if (song?.previewUrl) {
-      return { url: song.previewUrl, via: "itunes", song };
-    }
     return { url: null, via: null, song };
   }
 
   async function load(song, { autoplay = true, artistName = "", artistAliases = [] } = {}) {
     const seq = ++loadSeq;
+    lastLoadOpts = { artistName, artistAliases };
     current = song;
     card.hidden = false;
     paintMeta(song);
@@ -126,15 +133,37 @@ export function createPlayer(root) {
     hardStopAudio();
 
     let working = song;
+    const confirmedItunes =
+      working.playSource === "itunes" && Boolean(working.previewUrl);
+
+    // 全局规则：先查 iTunes；没有预览再网易云
+    if (!confirmedItunes) {
+      // 纯 Apple 曲库曲目（无网易 ID）直接当 itunes
+      if (working.previewUrl && !working.neteaseId) {
+        working = { ...working, playSource: "itunes" };
+      } else {
+        try {
+          working = await resolvePlaySource(working, artistName || working.artist || "", {
+            artistAliases,
+            bypassCache: working.playSource === "netease" || !working.playSource,
+          });
+        } catch {
+          /* keep working */
+        }
+      }
+      if (seq !== loadSeq) return;
+      current = working;
+      paintMeta(working);
+    }
+
     let { url, via } = await resolveUrl(working);
     if (seq !== loadSeq) return;
 
-    // NetEase often returns null (no cookie / no right) — retry iTunes match
-    if (!url) {
+    if (!url && working.playSource === "itunes") {
       try {
         working = await resolvePlaySource(working, artistName || working.artist || "", {
           artistAliases,
-          bypassCache: working.playSource === "netease",
+          bypassCache: true,
         });
         if (seq !== loadSeq) return;
         current = working;
@@ -191,7 +220,7 @@ export function createPlayer(root) {
 
   playBtn.addEventListener("click", async () => {
     if (!audio.src) {
-      if (current) await load(current, { autoplay: true });
+      if (current) await load(current, { autoplay: true, ...lastLoadOpts });
       return;
     }
     if (audio.paused) {
