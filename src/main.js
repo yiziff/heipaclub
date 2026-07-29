@@ -252,8 +252,7 @@ function openAboutSite() {
           </a>
         </div>
         <p class="about-site-footnote">
-          玩法灵感特别鸣谢
-          <a href="https://musiccup.app" target="_blank" rel="noopener noreferrer">MusicCup.app</a>
+          特别鸣谢：<a href="https://musiccup.app" target="_blank" rel="noopener noreferrer">MusicCup.app</a>
         </p>
       </div>
       <button type="button" class="about-site-done" data-about-close>关闭</button>
@@ -677,10 +676,7 @@ function renderHome() {
         <h1>黑怕<br /><em>巅峰对决</em></h1>
       </div>
       <p class="hero-tagline">
-        <span class="hero-tagline-row">
-          <span class="hero-tagline-lead">给你的本命 Rapper 办一场真正的说唱巅峰对决</span>
-          <span class="hero-thanks">特别鸣谢：<a href="https://musiccup.app" target="_blank" rel="noopener noreferrer">MusicCup.app</a></span>
-        </span>
+        <span class="hero-tagline-lead">给你的本命 Rapper 办一场真正的说唱巅峰对决</span>
         <span class="hero-tagline-sub">单曲对决 · 厂牌对抗 · 从夯到拉 · 选出你心中的 Rap Star</span>
       </p>
       <button type="button" class="about-site-btn" data-about-site>[关于本站]</button>

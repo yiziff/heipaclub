@@ -1321,37 +1321,8 @@ a.ghost-btn {
   text-underline-offset: 0.12em;
 }
 
-.hero-tagline-row {
-  display: inline-flex;
-  flex-wrap: wrap;
-  justify-content: center;
-  align-items: baseline;
-  gap: 0.35rem 0.75rem;
-}
-
 .hero-tagline-lead {
   display: inline;
-}
-
-.hero-thanks {
-  font-size: 0.68rem;
-  line-height: 1.35;
-  font-weight: 500;
-  letter-spacing: 0.02em;
-  color: #a8a59e;
-  white-space: nowrap;
-}
-
-.hero-thanks a {
-  color: inherit;
-  text-decoration: underline;
-  text-decoration-color: rgba(168, 165, 158, 0.55);
-  text-underline-offset: 0.12em;
-}
-
-.hero-thanks a:hover {
-  color: #7a7770;
-  text-decoration-color: currentColor;
 }
 
 .hero-tagline-sub {
