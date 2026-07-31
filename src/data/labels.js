@@ -7,6 +7,8 @@ export const HIPHOP_LABELS = [
     id: "digi-ghetto",
     name: "DIGI GHETTO",
     city: "",
+    /** 厂牌老大（用于厂牌头像，按优先级匹配名单） */
+    leader: ["Mac Ova Seas", "mac ova seas", "陈卓"],
     members: [
       "Mac Ova Seas",
       "mac ova seas",
@@ -31,6 +33,7 @@ export const HIPHOP_LABELS = [
     id: "wuren",
     name: "五人组",
     city: "",
+    leader: ["连麻Swimming", "连麻", "孙一民"],
     members: [
       "连麻Swimming",
       "连麻",
@@ -51,6 +54,7 @@ export const HIPHOP_LABELS = [
     id: "walking-dead",
     name: "活死人",
     city: "",
+    leader: ["法老", "孙权"],
     members: [
       "法老",
       "孙权",
@@ -81,6 +85,7 @@ export const HIPHOP_LABELS = [
     id: "cdc",
     name: "CDC",
     city: "成都",
+    leader: ["马思唯"],
     members: [
       "马思唯",
       "Dzknow",
@@ -108,6 +113,7 @@ export const HIPHOP_LABELS = [
     id: "csc",
     name: "CSC",
     city: "长沙",
+    leader: ["C-BLOCK", "盛宇", "D-SHINE"],
     members: [
       "C-BLOCK",
       "盛宇",
@@ -133,6 +139,7 @@ export const HIPHOP_LABELS = [
     id: "nous",
     name: "NOUS Underground",
     city: "西安",
+    leader: ["派克特", "PACT"],
     members: [
       "派克特",
       "PACT",
@@ -163,6 +170,7 @@ export const HIPHOP_LABELS = [
     id: "gosh",
     name: "GOSH",
     city: "重庆",
+    leader: ["GAI周延", "GAI"],
     members: [
       "GAI周延",
       "GAI",
@@ -187,6 +195,7 @@ export const HIPHOP_LABELS = [
     id: "free-out",
     name: "Free-Out",
     city: "南京",
+    leader: ["MC光光", "Mc光光"],
     members: [
       "MC光光",
       "Mc光光",
@@ -217,6 +226,7 @@ export const HIPHOP_LABELS = [
     id: "hhhui",
     name: "红花会",
     city: "西安",
+    leader: ["弹壳", "Danko", "刘嘉裕"],
     members: [
       "弹壳",
       "Danko",
@@ -240,6 +250,7 @@ export const HIPHOP_LABELS = [
     id: "mdsk",
     name: "MDSK",
     city: "北京",
+    leader: ["Tizzy T", "TizzyT", "Tizzy"],
     members: [
       "Tizzy T",
       "TizzyT",
@@ -262,6 +273,7 @@ export const HIPHOP_LABELS = [
     id: "dmg",
     name: "种梦音乐",
     city: "北京",
+    leader: ["GAI周延", "GAI"],
     members: [
       "GAI周延",
       "GAI",
@@ -293,6 +305,45 @@ function norm(s) {
     .replace(/[·．._\-#（）()]/g, "");
 }
 
+function artistMatchesAlias(artist, aliasRaw) {
+  const alias = norm(aliasRaw);
+  if (!alias || alias.length < 2) return false;
+  const keys = [...new Set([artist.name, artist.search, artist.id].map(norm).filter(Boolean))];
+  const latin = /^[a-z0-9]+$/.test(alias);
+  for (const k of keys) {
+    if (k === alias) return true;
+    if (latin) {
+      if (alias.length >= 5 && (k.startsWith(alias) || (alias.startsWith(k) && k.length >= 5))) {
+        if (/^lil/.test(alias) && /^lil/.test(k) && k !== alias) {
+          const aRest = alias.slice(3);
+          const kRest = k.slice(3);
+          if (!kRest.includes(aRest) && !aRest.includes(kRest)) continue;
+        }
+        return true;
+      }
+      continue;
+    }
+    if (k.includes(alias) || (alias.includes(k) && k.length >= 2)) return true;
+  }
+  return false;
+}
+
+/** 厂牌老大：按 leader 别名优先级匹配名单，找不到则退回成员列表首位。 */
+export function labelLeader(artists, labelId) {
+  const label = getLabel(labelId);
+  if (!label) return null;
+  const pool = Array.isArray(artists) ? artists : [];
+  const aliases = [
+    ...(label.leader || []),
+    ...(label.members || []).slice(0, 4),
+  ].filter(Boolean);
+  for (const alias of aliases) {
+    const hit = pool.find((a) => artistMatchesAlias(a, alias));
+    if (hit) return hit;
+  }
+  return null;
+}
+
 /** Resolve label member aliases → unique artists from roster. */
 export function artistsInLabel(artists, labelId) {
   const label = getLabel(labelId);
@@ -302,35 +353,12 @@ export function artistsInLabel(artists, labelId) {
   const seen = new Set();
 
   for (const a of artists) {
-    const keys = [...new Set([a.name, a.search, a.id].map(norm).filter(Boolean))];
     let matched = false;
     for (const alias of aliases) {
-      const latin = /^[a-z0-9]+$/.test(alias);
-      for (const k of keys) {
-        if (k === alias) {
-          matched = true;
-          break;
-        }
-        if (latin) {
-          // latin: avoid GAI⊂again / Echo⊂kkecho — only prefix of length≥5 or exact
-          if (alias.length >= 5 && (k.startsWith(alias) || alias.startsWith(k) && k.length >= 5)) {
-            if (/^lil/.test(alias) && /^lil/.test(k) && k !== alias) {
-              const aRest = alias.slice(3);
-              const kRest = k.slice(3);
-              if (!kRest.includes(aRest) && !aRest.includes(kRest)) continue;
-            }
-            matched = true;
-            break;
-          }
-          continue;
-        }
-        // CJK / mixed: substring ok
-        if (k.includes(alias) || (alias.includes(k) && k.length >= 2)) {
-          matched = true;
-          break;
-        }
+      if (artistMatchesAlias(a, alias)) {
+        matched = true;
+        break;
       }
-      if (matched) break;
     }
     if (matched && !seen.has(a.id)) {
       seen.add(a.id);

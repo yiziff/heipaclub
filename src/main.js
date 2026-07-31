@@ -3,7 +3,7 @@ import {
   ARTISTS,
   getArtist,
 } from "./data/artists.js";
-import { HIPHOP_LABELS, artistsInLabel, getLabel } from "./data/labels.js";
+import { HIPHOP_LABELS, artistsInLabel, getLabel, labelLeader } from "./data/labels.js";
 import {
   BEEF_GROUP_COUNT,
   BEEF_PICKS_PER_GROUP,
@@ -753,10 +753,20 @@ function renderHome() {
         ${HIPHOP_LABELS.map((l) => {
           const n = artistsInLabel(ARTISTS, l.id).length;
           const city = l.city ? ` · ${esc(l.city)}` : "";
+          const boss = labelLeader(ARTISTS, l.id);
           return `
             <button type="button" class="label-chip${labelId === l.id ? " active" : ""}" data-label="${esc(l.id)}">
-              <strong>${esc(l.name)}</strong>
-              <span>${n} 人${city}</span>
+              ${imgTag(boss?.avatar, {
+                alt: l.name,
+                className: "label-chip-avatar",
+                size: IMAGE_SIZES.chip,
+                width: 40,
+                height: 40,
+              })}
+              <span class="label-chip-text">
+                <strong>${esc(l.name)}</strong>
+                <span>${n} 人${city}</span>
+              </span>
             </button>`;
         }).join("")}
       </div>
@@ -1189,11 +1199,21 @@ function renderLabelBeef() {
             <div class="label-chip-row">
               ${HIPHOP_LABELS.map((l) => {
                 const n = artistsInLabel(ARTISTS, l.id).length;
+                const boss = labelLeader(ARTISTS, l.id);
                 return `<button type="button" class="label-chip${
                   pickA === l.id ? " active" : ""
                 }" data-pick="a" data-label="${esc(l.id)}" ${loading ? "disabled" : ""}>
-                  <strong>${esc(l.name)}</strong>
-                  <span>${n} 人${l.city ? ` · ${esc(l.city)}` : ""}</span>
+                  ${imgTag(boss?.avatar, {
+                    alt: l.name,
+                    className: "label-chip-avatar",
+                    size: IMAGE_SIZES.chip,
+                    width: 40,
+                    height: 40,
+                  })}
+                  <span class="label-chip-text">
+                    <strong>${esc(l.name)}</strong>
+                    <span>${n} 人${l.city ? ` · ${esc(l.city)}` : ""}</span>
+                  </span>
                 </button>`;
               }).join("")}
             </div>
@@ -1204,11 +1224,21 @@ function renderLabelBeef() {
             <div class="label-chip-row">
               ${HIPHOP_LABELS.map((l) => {
                 const n = artistsInLabel(ARTISTS, l.id).length;
+                const boss = labelLeader(ARTISTS, l.id);
                 return `<button type="button" class="label-chip${
                   pickB === l.id ? " active" : ""
                 }" data-pick="b" data-label="${esc(l.id)}" ${loading ? "disabled" : ""}>
-                  <strong>${esc(l.name)}</strong>
-                  <span>${n} 人${l.city ? ` · ${esc(l.city)}` : ""}</span>
+                  ${imgTag(boss?.avatar, {
+                    alt: l.name,
+                    className: "label-chip-avatar",
+                    size: IMAGE_SIZES.chip,
+                    width: 40,
+                    height: 40,
+                  })}
+                  <span class="label-chip-text">
+                    <strong>${esc(l.name)}</strong>
+                    <span>${n} 人${l.city ? ` · ${esc(l.city)}` : ""}</span>
+                  </span>
                 </button>`;
               }).join("")}
             </div>

@@ -2,7 +2,7 @@
  * Client-side rank filters: 中文/欧美 via roster, 厂牌聚合 via labels.
  */
 import { ARTISTS } from "./data/artists.js";
-import { HIPHOP_LABELS, artistsInLabel } from "./data/labels.js";
+import { HIPHOP_LABELS, artistsInLabel, labelLeader } from "./data/labels.js";
 
 function norm(s) {
   return String(s || "")
@@ -95,7 +95,7 @@ export function buildLabelRank(artistItems = []) {
         }
       }
     }
-    const top = members
+    const boss = labelLeader(members, label.id) || members
       .slice()
       .sort((a, b) => Number(b.fans || 0) - Number(a.fans || 0))[0];
     return {
@@ -104,7 +104,7 @@ export function buildLabelRank(artistItems = []) {
       city: label.city || "",
       members: members.length,
       wins,
-      avatar: top?.avatar || "",
+      avatar: boss?.avatar || "",
     };
   })
     .filter((r) => r.wins > 0 || r.members > 0)

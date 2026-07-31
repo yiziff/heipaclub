@@ -2419,16 +2419,33 @@ a.ghost-btn {
 
 .label-chip {
   display: inline-flex;
-  flex-direction: column;
-  align-items: flex-start;
-  gap: 0.12rem;
+  flex-direction: row;
+  align-items: center;
+  gap: 0.55rem;
   border: 1px solid var(--line);
   background: rgba(255, 255, 255, 0.55);
-  padding: 0.55rem 0.85rem;
+  padding: 0.45rem 0.75rem 0.45rem 0.45rem;
   border-radius: 12px;
   text-align: left;
-  min-width: 7.5rem;
+  min-width: 8.5rem;
   transition: transform 0.15s ease, border-color 0.15s ease, background 0.15s ease;
+}
+
+.label-chip-avatar {
+  width: 40px;
+  height: 40px;
+  border-radius: 50%;
+  object-fit: cover;
+  flex: none;
+  background: rgba(17, 17, 16, 0.08);
+}
+
+.label-chip-text {
+  display: inline-flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 0.1rem;
+  min-width: 0;
 }
 
 .label-chip strong {
@@ -2436,7 +2453,8 @@ a.ghost-btn {
   letter-spacing: 0.02em;
 }
 
-.label-chip span {
+.label-chip-text span,
+.label-chip > span {
   font-size: 0.75rem;
   color: var(--muted);
 }
@@ -2451,7 +2469,8 @@ a.ghost-btn {
   border-color: transparent;
 }
 
-.label-chip.active span {
+.label-chip.active .label-chip-text span,
+.label-chip.active > span {
   color: rgba(17, 17, 16, 0.7);
 }
 
