@@ -15,9 +15,9 @@ function fmt(sec) {
 
 function sourceLabel(song) {
   if (song?.playSource === "itunes" || (song?.previewUrl && song?.playSource !== "netease")) {
-    return "Apple 试听 · 约 30 秒";
+    return "试听 · 约 30 秒";
   }
-  return "网易云播放";
+  return "试听";
 }
 
 export function createPlayer(root) {
@@ -27,7 +27,7 @@ export function createPlayer(root) {
         <div class="cover-thumb empty" id="cup-cover" aria-hidden="true"></div>
         <div class="player-meta-text">
           <div class="song-title" id="cup-title">选一首歌试听</div>
-          <div class="song-sub" id="cup-sub">iTunes 优先 · 网易云兜底</div>
+          <div class="song-sub" id="cup-sub">点选歌曲开始试听</div>
         </div>
       </div>
       <audio id="cup-audio" preload="metadata"></audio>
@@ -95,11 +95,11 @@ export function createPlayer(root) {
       (Boolean(song.previewUrl) && song.playSource !== "netease");
     if (useItunes && song.trackViewUrl) {
       openLink.href = song.trackViewUrl;
-      openLink.textContent = "在 Apple Music 打开";
+      openLink.textContent = "播放链接";
       openLink.hidden = false;
     } else if (song.neteaseId) {
       openLink.href = neteaseSongPage(song.neteaseId);
-      openLink.textContent = "在网易云打开";
+      openLink.textContent = "播放链接";
       openLink.hidden = false;
     } else {
       openLink.hidden = true;
@@ -175,7 +175,7 @@ export function createPlayer(root) {
     if (via === "itunes") {
       current = { ...working, playSource: "itunes", previewUrl: url };
       paintMeta(current);
-      hint.textContent = "Apple 官方试听（约 30 秒）";
+      hint.textContent = "试听约 30 秒";
     } else {
       current = { ...working, playSource: "netease" };
       paintMeta(current);
@@ -193,7 +193,7 @@ export function createPlayer(root) {
           return;
         }
         setPlayingUi(true);
-        if (via === "itunes") hint.textContent = "Apple 官方试听（约 30 秒）";
+        if (via === "itunes") hint.textContent = "试听约 30 秒";
         else hint.textContent = "";
       } catch {
         if (seq !== loadSeq) return;
