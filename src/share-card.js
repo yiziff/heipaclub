@@ -53,7 +53,7 @@ function metaLine(song) {
 function coverCacheKey(src, size) {
   const sized = sizedCoverUrl(src, size);
   if (!sized) return "";
-  return proxiedImageUrl(sized);
+  return proxiedImageUrl(sized, size);
 }
 
 /**

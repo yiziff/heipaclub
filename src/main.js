@@ -22,7 +22,7 @@ import {
   toggleGroupPick,
   toggleRevivalPick,
 } from "./label-beef.js";
-import { coverUrl, imgTag } from "./artwork.js";
+import { coverUrl, IMAGE_SIZES, imgTag, optimizedImageUrl } from "./artwork.js";
 import {
   drawHangLaField,
   emptyHangLaState,
@@ -49,18 +49,23 @@ import {
 } from "./itunes.js";
 import { hasHotTopPack, loadHotTopPack } from "./hot-tops.js";
 import { fetchArtistTopCache, putArtistTopCache } from "./artist-top-cache.js";
+import { trackEvent } from "./metrics.js";
 import { createPlayer, stopAllPageAudio } from "./player.js";
-import QRCode from "qrcode";
-import { buildShareCardBlob, warmShareCovers } from "./share-card.js";
 import {
   fetchArtistRank,
+  fetchHangLaRank,
+  fetchLabelBeefMatchups,
+  fetchLabelBeefRank,
+  fetchRankMeta,
   fetchSongRank,
+  markMilestoneShown,
   reportChampionWin,
+  reportHangLaRound,
 } from "./rank-api.js";
 import {
-  buildLabelRank,
   filterLabelRank,
   filterRankItemsByRegion,
+  mergeLabelBeefRank,
 } from "./rank-filter.js";
 import {
   buildBracket,
@@ -81,16 +86,112 @@ const STORAGE_KEY = "cn-rap-cup:v5";
 const TOP_N = 50;
 const FIELD_MAX = 32;
 const SITE_URL = "https://heipaclub.com";
+const SUPPORT_AUTHOR_QR_SRC = "/support-author-qr.png";
+const SHARE_CTA_LABEL = "分享对阵图";
 const app = document.getElementById("app");
 const artistCache = new Map();
 const runtimeArtistCatalog = new Map();
 const avatarFillInFlight = new Set();
+const preloadedImageHrefs = new Set();
+let shareCardModulePromise = null;
+let qrCodeModulePromise = null;
+
+function getShareCardModule() {
+  if (!shareCardModulePromise) {
+    shareCardModulePromise = import("./share-card.js");
+  }
+  return shareCardModulePromise;
+}
+
+function getQrCodeModule() {
+  if (!qrCodeModulePromise) {
+    qrCodeModulePromise = import("qrcode");
+  }
+  return qrCodeModulePromise;
+}
+
+function ensureImagePreload(src, size, fetchPriority = "high") {
+  const href = optimizedImageUrl(src, { size, proxy: "netease" });
+  if (!href || preloadedImageHrefs.has(href)) return;
+  preloadedImageHrefs.add(href);
+  const link = document.createElement("link");
+  link.rel = "preload";
+  link.as = "image";
+  link.href = href;
+  if (fetchPriority === "high" || fetchPriority === "low") {
+    link.setAttribute("fetchpriority", fetchPriority);
+  }
+  document.head.appendChild(link);
+}
+
+/** Warm both LQIP thumb + display size for a match cover. */
+function preloadMatchCover(src, { priority = "high" } = {}) {
+  if (!src) return;
+  ensureImagePreload(src, IMAGE_SIZES.list, priority);
+  ensureImagePreload(src, IMAGE_SIZES.match, priority);
+}
+
+/** After current pick, peek both outcomes and warm the next match covers. */
+function prefetchUpcomingMatchCovers(state, match, avatar) {
+  if (!match?.id) return;
+  for (const side of ["a", "b"]) {
+    try {
+      const nextBracket = chooseWinner(state.bracket, match.id, side);
+      const next = currentMatch(nextBracket);
+      if (!next?.a || !next?.b) continue;
+      preloadMatchCover(coverUrl(next.a, avatar), { priority: "low" });
+      preloadMatchCover(coverUrl(next.b, avatar), { priority: "low" });
+    } catch {
+      /* ignore peek failures */
+    }
+  }
+}
+
+function progressivePickCover(song, fallback) {
+  const raw = coverUrl(song, fallback);
+  if (!raw) {
+    return `<div class="pick-cover img-fallback" aria-hidden="true"></div>`;
+  }
+  const thumb = optimizedImageUrl(raw, { size: IMAGE_SIZES.list });
+  const full = optimizedImageUrl(raw, { size: IMAGE_SIZES.match });
+  return `<img class="pick-cover" src="${esc(thumb)}" data-full-src="${esc(
+    full
+  )}" alt="${esc(song?.title || "")}" loading="eager" fetchpriority="high" decoding="async" referrerpolicy="no-referrer" width="320" height="320" />`;
+}
+
+function upgradeProgressiveCovers(root = document) {
+  root.querySelectorAll("img.pick-cover[data-full-src]").forEach((img) => {
+    const full = img.getAttribute("data-full-src");
+    if (!full || img.dataset.upgraded === "1") return;
+    const hi = new Image();
+    hi.decoding = "async";
+    hi.fetchPriority = "high";
+    hi.onload = () => {
+      if (!img.isConnected) return;
+      img.src = full;
+      img.removeAttribute("data-full-src");
+      img.dataset.upgraded = "1";
+    };
+    hi.onerror = () => {
+      img.removeAttribute("data-full-src");
+    };
+    hi.src = full;
+  });
+}
 
 app?.addEventListener("click", (e) => {
-  const btn = e.target.closest("[data-about-site]");
-  if (!btn) return;
-  e.preventDefault();
-  openAboutSite();
+  const about = e.target.closest("[data-about-site]");
+  if (about) {
+    e.preventDefault();
+    trackEvent("about_open");
+    openAboutSite();
+    return;
+  }
+  const guide = e.target.closest("[data-play-guide]");
+  if (guide) {
+    e.preventDefault();
+    openPlayGuide();
+  }
 });
 
 function loadState() {
@@ -125,6 +226,14 @@ function navigate(path) {
   location.hash = path;
 }
 
+/** Only show SEO guide on home (and /guide which opens home + modal). */
+function syncSeoGuideVisibility(parts) {
+  const guide = document.getElementById("seo-guide");
+  if (!guide) return;
+  const home = !parts?.[0] || parts[0] === "guide";
+  guide.hidden = !home;
+}
+
 window.addEventListener("hashchange", render);
 bootstrap();
 
@@ -138,10 +247,17 @@ function render() {
   stopAllPageAudio();
   const { parts } = route();
   const saved = loadState();
+  syncSeoGuideVisibility(parts);
 
   if (parts[0] === "rank") {
     const tab =
-      parts[1] === "artists" ? "artists" : parts[1] === "labels" ? "labels" : "songs";
+      parts[1] === "artists"
+        ? "artists"
+        : parts[1] === "labels"
+          ? "labels"
+          : parts[1] === "hangla"
+            ? "hangla"
+            : "songs";
     renderRank(tab);
     return;
   }
@@ -167,6 +283,11 @@ function render() {
   }
   if (parts[0] === "label-beef") {
     renderLabelBeef();
+    return;
+  }
+  if (parts[0] === "guide") {
+    renderHome();
+    queueMicrotask(() => openPlayGuide());
     return;
   }
   renderHome();
@@ -253,6 +374,7 @@ function openAboutSite() {
         </div>
         <p class="about-site-footnote">
           特别鸣谢：<a href="https://musiccup.app" target="_blank" rel="noopener noreferrer">MusicCup.app</a>
+          · <button type="button" class="about-inline-link" data-open-guide>玩法指南</button>
         </p>
       </div>
       <button type="button" class="about-site-done" data-about-close>关闭</button>
@@ -268,6 +390,88 @@ function openAboutSite() {
   };
   el.querySelectorAll("[data-about-close]").forEach((node) => {
     node.addEventListener("click", close);
+  });
+  el.querySelector("[data-open-guide]")?.addEventListener("click", () => {
+    close();
+    setTimeout(() => openPlayGuide(), 180);
+  });
+  const onKey = (ev) => {
+    if (ev.key === "Escape") {
+      document.removeEventListener("keydown", onKey);
+      close();
+    }
+  };
+  document.addEventListener("keydown", onKey);
+}
+
+function openPlayGuide() {
+  const existing = document.getElementById("play-guide");
+  if (existing) existing.remove();
+
+  const el = document.createElement("div");
+  el.id = "play-guide";
+  el.className = "about-site play-guide";
+  el.setAttribute("role", "dialog");
+  el.setAttribute("aria-modal", "true");
+  el.setAttribute("aria-labelledby", "play-guide-title");
+  el.innerHTML = `
+    <div class="about-site-backdrop" data-guide-close></div>
+    <div class="about-site-panel play-guide-panel">
+      <header class="about-site-head">
+        <div class="about-site-head-main">
+          <div class="about-site-icon brand-wordmark" aria-hidden="true">
+            <span class="brand-heipa">黑怕</span>
+          </div>
+          <h2 id="play-guide-title">玩法指南</h2>
+        </div>
+        <button type="button" class="about-site-close" data-guide-close aria-label="关闭">×</button>
+      </header>
+      <div class="about-site-body">
+        <p>
+          <strong>黑怕巅峰对决</strong>专注说唱，尤其是<strong>中文说唱</strong>：
+          单曲 1v1 淘汰、新颖厂牌对战、流行锐评「从夯到拉」，选出你心中的 Rap Star 与 Hit Song。
+        </p>
+        <div class="about-site-section-label">单曲巅峰对决</div>
+        <p>
+          选歌手开赛，热门单曲或自定义歌单均可。每轮两首对决，决出冠军后计入排行榜——用耳朵投出本命曲。
+        </p>
+        <div class="about-site-section-label">厂牌巅峰混战</div>
+        <p>
+          以 HipHop 厂牌为单位拉人对垒的新颖对战模式，适合厂牌粉一起刷，感受说唱厂牌之间的对决张力。
+        </p>
+        <div class="about-site-section-label">锐评从夯到拉</div>
+        <p>
+          随机抽取 Rapper，分进夯 / 顶级 / 人上人 / NPC / 拉了等档位，快速输出你的锐评排序，结果可复制分享。
+        </p>
+        <div class="about-site-section-label">排行榜与防刷</div>
+        <p>
+          冠军匿名累计进榜。战绩已开启防刷：每人每天最多计入 5 次有效评选。
+        </p>
+        <p class="about-site-footnote">
+          想了解作者故事？
+          <button type="button" class="about-inline-link" data-open-about>关于本站</button>
+        </p>
+      </div>
+      <button type="button" class="about-site-done" data-guide-close>知道了</button>
+    </div>
+  `;
+  document.body.appendChild(el);
+  requestAnimationFrame(() => el.classList.add("is-on"));
+
+  const close = () => {
+    el.classList.remove("is-on");
+    el.classList.add("is-out");
+    setTimeout(() => el.remove(), 220);
+    if ((location.hash.replace(/^#/, "") || "/") === "/guide") {
+      history.replaceState(null, "", "#/");
+    }
+  };
+  el.querySelectorAll("[data-guide-close]").forEach((node) => {
+    node.addEventListener("click", close);
+  });
+  el.querySelector("[data-open-about]")?.addEventListener("click", () => {
+    close();
+    setTimeout(() => openAboutSite(), 180);
   });
   const onKey = (ev) => {
     if (ev.key === "Escape") {
@@ -295,12 +499,22 @@ async function softFillAvatars() {
 function patchAvatarDom(artist) {
   const node = app.querySelector(`[data-artist="${artist.id}"] .artist-avatar, [data-artist="${artist.id}"] .img-fallback`);
   if (!node || !artist.avatar || location.hash.replace(/^#/, "") !== "/") return;
+  const cards = app.querySelectorAll(".artist-card[data-artist]");
+  let idx = -1;
+  cards.forEach((card, i) => {
+    if (card.dataset.artist === artist.id) idx = i;
+  });
+  const eager = idx >= 0 && idx < 4;
   const img = document.createElement("img");
   img.className = "artist-avatar";
-  img.src = artist.avatar;
+  img.src = optimizedImageUrl(artist.avatar, { size: IMAGE_SIZES.avatar });
   img.alt = artist.name;
-  img.loading = "lazy";
+  img.loading = eager ? "eager" : "lazy";
+  img.decoding = "async";
   img.referrerPolicy = "no-referrer";
+  if (eager && idx < 2) img.fetchPriority = "high";
+  img.width = 96;
+  img.height = 96;
   node.replaceWith(img);
 }
 
@@ -405,6 +619,7 @@ function renderHome() {
   let homeShowAll = false;
   /** neteaseArtistId or name → wins */
   const rankWins = new Map();
+  let lastPaintQuery = "";
 
   const norm = (s) =>
     String(s || "")
@@ -568,6 +783,11 @@ function renderHome() {
   };
 
   let searchToken = 0;
+  const artistGridClick = (event) => {
+    const card = event.target.closest("[data-artist]");
+    if (!card) return;
+    navigate(`/artist/${card.dataset.artist}`);
+  };
   const paintMoreBar = (shown, poolTotal, query) => {
     const bar = document.getElementById("home-more");
     if (!bar) return;
@@ -579,14 +799,13 @@ function renderHome() {
       return;
     }
     bar.hidden = false;
-    const remain = poolTotal - shown;
     bar.innerHTML = `
       <button type="button" class="ghost-btn home-more-btn" id="home-more-btn">
-        显示更多（再 ${Math.min(50, remain)} 位）
+        显示更多
       </button>
       ${
         homeLimit > 50
-          ? `<button type="button" class="primary-btn home-all-btn" id="home-all-btn">显示全部（${poolTotal}）</button>`
+          ? `<button type="button" class="primary-btn home-all-btn" id="home-all-btn">显示全部</button>`
           : ""
       }
     `;
@@ -606,65 +825,85 @@ function renderHome() {
     const poolTotal =
       regionMode === "label" || query ? 0 : basePool().length;
     const localList = sortList(filteredLocalList(q));
-    let list = localList;
     const grid = document.getElementById("artist-grid");
     const count = document.getElementById("artist-count");
     if (!grid) return;
-    if (query && regionMode !== "label") {
-      grid.innerHTML = `<p class="loading-line">正在搜索 iTunes 歌手…</p>`;
-      list = sortList(await mergeWithItunes(query, localList));
-      list = list.filter((a) => artistRegion(a) === regionMode);
-      if (token !== searchToken) return;
-    }
-    const labelMeta = regionMode === "label" && labelId ? getLabel(labelId) : null;
-    if (count) {
-      if (query && regionMode !== "label") {
-        count.textContent = `${list.length} 位匹配（本地 + iTunes）`;
-      } else if (labelMeta) {
-        count.textContent = `${labelMeta.name}${labelMeta.city ? ` · ${labelMeta.city}` : ""} · ${list.length} 位成员（名单内）`;
-      } else {
-        count.textContent = `${list.length} / ${poolTotal || ARTISTS.length} 位 Rapper（首页展示）`;
+
+    const writeGrid = (list) => {
+      const labelMeta = regionMode === "label" && labelId ? getLabel(labelId) : null;
+      if (count) {
+        if (labelMeta) {
+          count.hidden = false;
+          count.textContent = `${labelMeta.name}${labelMeta.city ? ` · ${labelMeta.city}` : ""} · ${list.length} 位成员`;
+        } else {
+          count.hidden = true;
+          count.textContent = "";
+        }
       }
-    }
-    grid.innerHTML = list.length
-      ? list
-          .map((a) => {
-            const wins = rankWins.get(artistRankKey(a)) || rankWins.get(a.name) || 0;
-            const winMeta =
-              sortMode === "rank" && wins
-                ? ` · 单曲夺冠 ${Number(wins).toLocaleString("zh-CN")} 次`
-                : "";
-            return `
+      if (list[0]?.avatar) {
+        ensureImagePreload(list[0].avatar, IMAGE_SIZES.avatar, "high");
+      }
+      if (list[1]?.avatar) {
+        ensureImagePreload(list[1].avatar, IMAGE_SIZES.avatar, "high");
+      }
+      /** First-screen avatars should not be lazy (LCP); rest of the long list stays lazy. */
+      const HOME_EAGER_COUNT = 4;
+      grid.innerHTML = list.length
+        ? list
+            .map((a, index) => {
+              const wins = rankWins.get(artistRankKey(a)) || rankWins.get(a.name) || 0;
+              const winMeta =
+                sortMode === "rank" && wins
+                  ? ` · 单曲夺冠 ${Number(wins).toLocaleString("zh-CN")} 次`
+                  : "";
+              const eager = index < HOME_EAGER_COUNT;
+              const metaBits = [];
+              if (a.fans) metaBits.push(`${Number(a.fans).toLocaleString("zh-CN")} 粉`);
+              if (winMeta) metaBits.push(winMeta.replace(/^\s*·\s*/, ""));
+              return `
         <button type="button" class="artist-card" data-artist="${a.id}">
-          ${imgTag(a.avatar, { alt: a.name, className: "artist-avatar" })}
+          ${imgTag(a.avatar, {
+            alt: a.name,
+            className: "artist-avatar",
+            size: IMAGE_SIZES.avatar,
+            loading: eager ? "eager" : "lazy",
+            fetchPriority: index < 2 ? "high" : "auto",
+            width: 96,
+            height: 96,
+            sizes: "96px",
+            responsive: false,
+          })}
           <div class="artist-card-body">
             <div class="name">${esc(a.name)}</div>
-            <p class="meta">${
-              a.fans
-                ? `${Number(a.fans).toLocaleString("zh-CN")} 粉`
-                : a.source === "itunes"
-                  ? "iTunes"
-                  : `热门 ${TOP_N}`
-            }${winMeta}</p>
+            <p class="meta">${esc(metaBits.join(" · "))}</p>
           </div>
         </button>`;
-          })
-          .join("")
-      : `<p class="loading-line">${
-          regionMode === "label"
-            ? "该厂牌成员暂未匹配到名单，或尚未收录。"
-            : "没有匹配的 Rapper，换个关键词试试。"
-        }</p>`;
+            })
+            .join("")
+        : `<p class="loading-line">${
+            regionMode === "label"
+              ? "该厂牌成员暂未匹配到名单，或尚未收录。"
+              : "没有匹配的 Rapper，换个关键词试试。"
+          }</p>`;
 
-    grid.querySelectorAll("[data-artist]").forEach((btn) => {
-      btn.addEventListener("click", () => navigate(`/artist/${btn.dataset.artist}`));
-    });
+      list.slice(0, 24).forEach((a) => {
+        if (!a.avatar) fillAvatarForArtist(a);
+      });
 
-    list.slice(0, 24).forEach((a) => {
-      if (!a.avatar) fillAvatarForArtist(a);
-    });
+      lastPaintQuery = query;
+      paintMoreBar(list.length, poolTotal, query);
+    };
 
-    paintMoreBar(list.length, poolTotal, query);
+    // Paint local results first so search INP is not blocked by iTunes.
+    writeGrid(localList);
+
+    if (query && regionMode !== "label" && query.length >= 2) {
+      const merged = sortList(await mergeWithItunes(query, localList)).filter(
+        (a) => artistRegion(a) === regionMode
+      );
+      if (token !== searchToken) return;
+      writeGrid(merged);
+    }
   };
 
   app.innerHTML = shell(
@@ -681,9 +920,9 @@ function renderHome() {
       </p>
       <button type="button" class="about-site-btn" data-about-site>[关于本站]</button>
     </section>
-    <div class="section-title">选择歌手 <span id="artist-count">50 / ${ARTISTS.length} 位 Rapper（首页展示）</span></div>
+    <div class="section-title">选择歌手 <span id="artist-count" hidden></span></div>
     <div class="search-row">
-      <input id="artist-search" type="search" placeholder="搜：歌手名（本地 + iTunes）…" autocomplete="off" />
+      <input id="artist-search" type="search" placeholder="搜索歌手…" autocomplete="off" />
     </div>
     <div class="filter-row sort-row" id="region-row" role="group" aria-label="地区筛选">
       <span class="sort-label">范围</span>
@@ -703,6 +942,7 @@ function renderHome() {
   `,
     {
       actions: `
+        <button type="button" class="ghost-btn guide-top-btn" data-play-guide>玩法指南</button>
         <button type="button" class="ghost-btn beef-top-btn" id="beef-entry">厂牌巅峰混战</button>
         <button type="button" class="ghost-btn hangla-top-btn" id="hangla-entry">锐评从夯到拉</button>
       `,
@@ -710,21 +950,25 @@ function renderHome() {
   );
 
   const input = document.getElementById("artist-search");
+  const grid = document.getElementById("artist-grid");
+  grid?.addEventListener("click", artistGridClick);
   paintGrid("");
 
   document.getElementById("hangla-entry")?.addEventListener("click", () => navigate("/hangla"));
   document.getElementById("beef-entry")?.addEventListener("click", () => navigate("/label-beef"));
 
   let timer = null;
-  const apply = () => {
+  const apply = (force = false) => {
     clearTimeout(timer);
+    const nextQuery = String(input?.value || "").trim();
+    if (!force && nextQuery === lastPaintQuery) return;
     timer = setTimeout(() => {
       paintGrid(input?.value || "");
     }, 180);
   };
   input?.addEventListener("input", () => {
     // searching: no need to reset paging permanently; empty search keeps limit
-    apply();
+    apply(false);
   });
 
   document.querySelectorAll("#sort-row [data-sort]").forEach((chip) => {
@@ -733,7 +977,7 @@ function renderHome() {
       document
         .querySelectorAll("#sort-row .mode-chip")
         .forEach((c) => c.classList.toggle("active", c === chip));
-      apply();
+      apply(true);
     });
   });
 
@@ -748,7 +992,7 @@ function renderHome() {
         }
         syncRegionChips();
         paintLabelPanel();
-        if (labelId) apply();
+        if (labelId) apply(true);
         return;
       }
       regionMode = r === "west" ? "west" : "cn";
@@ -757,7 +1001,7 @@ function renderHome() {
       resetHomePaging();
       syncRegionChips();
       paintLabelPanel();
-      apply();
+      apply(true);
     });
   });
 
@@ -769,7 +1013,7 @@ function renderHome() {
         if (item.artistId) rankWins.set(String(item.artistId), wins);
         if (item.name) rankWins.set(String(item.name), wins);
       }
-      if (sortMode === "rank") apply();
+      if (sortMode === "rank") apply(true);
     })
     .catch(() => {});
 
@@ -853,7 +1097,13 @@ function renderLabelBeef() {
     <button type="button" class="beef-song-card${selected ? " is-selected" : ""}${
       dim ? " is-dim" : ""
     }" data-song="${esc(beefSongKey(song))}">
-      ${imgTag(song.cover || song.coverSm, { alt: song.title, className: "beef-song-cover" })}
+      ${imgTag(song.cover || song.coverSm, {
+        alt: song.title,
+        className: "beef-song-cover",
+        size: IMAGE_SIZES.list,
+        width: 56,
+        height: 56,
+      })}
       <div class="beef-song-meta">
         <strong>${esc(song.title)}</strong>
         <span>${esc(song.rosterArtistName || song.artist || "")}</span>
@@ -1103,6 +1353,7 @@ function renderLabelBeef() {
             artistName: `${state.labels[0].name} vs ${state.labels[1].name}`,
             artistAvatar: "",
           };
+          trackEvent("cup_start");
           saveState(state);
           navigate("/bracket");
         } catch (e) {
@@ -1164,7 +1415,13 @@ function hangLaChip(artist, { selected = false, inTier = false } = {}) {
       class="hangla-chip${selected ? " is-selected" : ""}${inTier ? " in-tier" : ""}"
       data-hangla-id="${esc(artist.id)}"
     >
-      ${imgTag(artist.avatar, { alt: artist.name, className: "hangla-chip-avatar" })}
+      ${imgTag(artist.avatar, {
+        alt: artist.name,
+        className: "hangla-chip-avatar",
+        size: IMAGE_SIZES.chip,
+        width: 28,
+        height: 28,
+      })}
       <span class="hangla-chip-name">${esc(artist.name)}</span>
     </button>
   `;
@@ -1174,7 +1431,14 @@ function hangLaBlindCard(artist) {
   if (!artist) return `<p class="hangla-empty">全部排完了</p>`;
   return `
     <div class="hangla-blind-card" data-hangla-id="${esc(artist.id)}">
-      ${imgTag(artist.avatar, { alt: artist.name, className: "hangla-blind-avatar" })}
+      ${imgTag(artist.avatar, {
+        alt: artist.name,
+        className: "hangla-blind-avatar",
+        size: IMAGE_SIZES.list,
+        loading: "eager",
+        width: 72,
+        height: 72,
+      })}
       <div class="hangla-blind-meta">
         <strong>${esc(artist.name)}</strong>
         <span>${esc(artist.city || artist.tag || "Rapper")}${artist.fans ? ` · ${Number(artist.fans).toLocaleString("zh-CN")} 粉` : ""}</span>
@@ -1342,6 +1606,9 @@ function renderHangLa() {
                               return `<span class="hangla-result-pill">${imgTag(a?.avatar, {
                                 alt: a?.name || "",
                                 className: "hangla-chip-avatar",
+                                size: IMAGE_SIZES.chip,
+                                width: 28,
+                                height: 28,
                               })}${esc(a?.name || id)}</span>`;
                             })
                             .join("")
@@ -1379,6 +1646,19 @@ function renderHangLa() {
         state = null;
         paint("setup");
       });
+      // 计入最夯 / 最拉榜（防刷限额与单曲夺冠共用）
+      const toEntry = (id) => {
+        const a = findArtist(state.field, id);
+        return {
+          artistId: id,
+          name: a?.name || id,
+          avatar: a?.avatar || "",
+        };
+      };
+      reportHangLaRound({
+        hang: (state.tiers.hang || []).map(toEntry),
+        lale: (state.tiers.lale || []).map(toEntry),
+      }).catch(() => {});
       return;
     }
 
@@ -1645,6 +1925,7 @@ async function renderSetup(artistId) {
       max: FIELD_MAX,
       field: cupField,
     });
+    trackEvent("cup_start");
     saveState({
       artistId: artist.id,
       artistName: artist.name,
@@ -1705,7 +1986,15 @@ async function renderSetup(artistId) {
       `
       <section class="setup">
         <div class="setup-head setup-head-with-avatar">
-          ${imgTag(artist.avatar, { alt: artist.name, className: "setup-avatar" })}
+          ${imgTag(artist.avatar, {
+            alt: artist.name,
+            className: "setup-avatar",
+            size: IMAGE_SIZES.setup,
+            loading: "eager",
+            fetchPriority: "high",
+            width: 120,
+            height: 120,
+          })}
           <div>
             <h1>${esc(artist.name)}</h1>
             <p>${esc(artist.city)} · ${esc(artist.tag)} · 曲库 ${poolSongs.length} 首 · ${size} 强</p>
@@ -1775,7 +2064,13 @@ async function renderSetup(artistId) {
                       ? `<span class="song-field-tag">签</span>`
                       : `<span class="song-field-tag muted">${i + 1}</span>`
                 }
-                ${imgTag(coverUrl(s, artist.avatar), { alt: s.title, className: "song-cover" })}
+                ${imgTag(coverUrl(s, artist.avatar), {
+                  alt: s.title,
+                  className: "song-cover",
+                  size: IMAGE_SIZES.chip,
+                  width: 36,
+                  height: 36,
+                })}
                 <span class="song-preview-text">
                   <strong>${i + 1}. ${esc(s.title)}</strong>
                   <em>${esc(s.album || "单曲")}${vsHint}${
@@ -2033,7 +2328,13 @@ function bracketSlot(
     : "";
   return `
     <div class="bracket-slot${pathCls}${resultCls}" title="${esc(song.title)}"${pathAttrs}>
-      ${imgTag(coverUrl(song, fallbackAvatar), { alt: song.title, className: "bracket-slot-cover" })}
+      ${imgTag(coverUrl(song, fallbackAvatar), {
+        alt: song.title,
+        className: "bracket-slot-cover",
+        size: IMAGE_SIZES.chip,
+        width: 24,
+        height: 24,
+      })}
       <span class="bracket-slot-title">${esc(song.title)}</span>
     </div>
   `;
@@ -2100,7 +2401,7 @@ function renderBracketHtml(bracket, fallbackAvatar) {
 
   const finalMatch = finalRound[0] || { a: null, b: null };
   const artistBg = fallbackAvatar
-    ? `--artist-bg:url('${String(fallbackAvatar).replace(/'/g, "%27")}');`
+    ? `--artist-bg:url('${optimizedImageUrl(fallbackAvatar, { size: IMAGE_SIZES.setup }).replace(/'/g, "%27")}');`
     : "";
 
   const champHero = champ
@@ -2116,6 +2417,11 @@ function renderBracketHtml(bracket, fallbackAvatar) {
           ${imgTag(coverUrl(champ, fallbackAvatar), {
             alt: champ.title,
             className: "champ-hero-cover",
+            size: IMAGE_SIZES.match,
+            loading: "eager",
+            fetchPriority: "high",
+            width: 160,
+            height: 160,
           })}
           <span class="champ-hero-crown" aria-hidden="true">♛</span>
         </div>
@@ -2378,13 +2684,22 @@ function renderBracketPreview(state) {
   let pollTimer = null;
   let started = false;
 
-  void warmShareCovers(state);
+  void getShareCardModule()
+    .then((mod) => mod.warmShareCovers(state))
+    .catch(() => {});
 
   app.innerHTML = shell(
     `
     <section class="bracket-preview">
       <div class="bracket-preview-head">
-        ${imgTag(avatar, { alt: state.artistName, className: "setup-avatar" })}
+        ${imgTag(avatar, {
+          alt: state.artistName,
+          className: "setup-avatar",
+          size: IMAGE_SIZES.setup,
+          loading: "eager",
+          width: 120,
+          height: 120,
+        })}
         <div class="bracket-preview-copy">
           <h1 class="bracket-title-fx"><span class="rapper-name">${esc(state.artistName)} · ${size} 强对阵图</span></h1>
         </div>
@@ -2478,6 +2793,9 @@ function renderMatch(state) {
   const scoreA = la ? scores?.[la.id] || 0 : 0;
   const scoreB = lb ? scores?.[lb.id] || 0 : 0;
   const totalScore = Math.max(1, scoreA + scoreB);
+  preloadMatchCover(coverUrl(match.a, avatar), { priority: "high" });
+  preloadMatchCover(coverUrl(match.b, avatar), { priority: "high" });
+  prefetchUpcomingMatchCovers(state, match, avatar);
 
   app.innerHTML = shell(
     `
@@ -2486,7 +2804,14 @@ function renderMatch(state) {
         ${
           isBeef
             ? `<div class="beef-match-brand" aria-hidden="true">⚔</div>`
-            : imgTag(avatar, { alt: state.artistName, className: "match-artist-avatar" })
+            : imgTag(avatar, {
+                alt: state.artistName,
+                className: "match-artist-avatar",
+                size: IMAGE_SIZES.chip,
+                loading: "eager",
+                width: 36,
+                height: 36,
+              })
         }
         <div>
           <strong>${esc(label)}</strong>
@@ -2532,6 +2857,7 @@ function renderMatch(state) {
   let previewReq = 0;
   // 进入对战时后台预取 A/B 音源，减轻点试听等待
   prefetchMatchPlaySources(state, match);
+  upgradeProgressiveCovers(app);
 
   app.querySelectorAll("[data-preview]").forEach((btn) => {
     btn.addEventListener("click", async (e) => {
@@ -2573,18 +2899,7 @@ function renderMatch(state) {
       const next = { ...state, bracket: nextBracket };
       saveState(next);
       if (nextBracket.champion) {
-        const champLabel = nextBracket.champion.labelName
-          ? ` · ${nextBracket.champion.labelName}`
-          : "";
-        showRoundSplash(
-          {
-            title: "冠军诞生",
-            sub: isBeef
-              ? `${nextBracket.champion.title}${champLabel} 加冕厂牌混战之王`
-              : `${nextBracket.champion.title} · ${state.artistName} 本命曲加冕`,
-          },
-          () => navigate("/champ")
-        );
+        goChampAfterWin(next);
         return;
       }
       // 本轮全部打完 → 弹出下一轮环节动画（32→16、16→8…）
@@ -2638,6 +2953,130 @@ function showRoundSplash({ title, sub }, onDone) {
   auto = setTimeout(finish, 2200);
 }
 
+/**
+ * 决出冠军 →「冠军诞生」→（若撞上 ×100）里程碑彩蛋 → 冠军页
+ * 上报与 splash 并行，尽量在动画结束时已拿到结果。
+ */
+function goChampAfterWin(state) {
+  const champ = state.bracket?.champion;
+  if (!champ) {
+    navigate("/champ");
+    return;
+  }
+
+  const isBeef = state.cupType === "label-beef";
+  const champLabel = champ.labelName ? ` · ${champ.labelName}` : "";
+  const winPayload = {
+    song: champ,
+    artistId: state.neteaseArtistId,
+    artistName: state.artistName,
+    artistAvatar: state.artistAvatar || "",
+  };
+  if (isBeef && state.labels?.length >= 2) {
+    const winnerId = champ.labelId || "";
+    const winnerName = champ.labelName || "";
+    const loser =
+      state.labels.find((l) => l.id && l.id !== winnerId) ||
+      state.labels.find((l) => l.name && l.name !== winnerName) ||
+      state.labels[1];
+    winPayload.cupType = "label-beef";
+    winPayload.songArtist = champ.rosterArtistName || champ.artist || "";
+    winPayload.artistName = winPayload.songArtist;
+    winPayload.winnerLabelId = winnerId;
+    winPayload.winnerLabelName = winnerName;
+    winPayload.loserLabelId = loser?.id || "";
+    winPayload.loserLabelName = loser?.name || "";
+  }
+  const winPromise = reportChampionWin(winPayload).catch(() => null);
+
+  showRoundSplash(
+    {
+      title: "冠军诞生",
+      sub: isBeef
+        ? `${champ.title}${champLabel} 加冕厂牌混战之王`
+        : `${champ.title} · ${state.artistName} 本命曲加冕`,
+    },
+    async () => {
+      // 上报若尚未返回，短暂遮罩避免闪回对战页
+      let veil = null;
+      const veilTimer = setTimeout(() => {
+        veil = document.createElement("div");
+        veil.className = "round-splash is-on";
+        veil.innerHTML = `<div class="round-splash-bg" aria-hidden="true"></div>`;
+        document.body.appendChild(veil);
+      }, 40);
+      const data = await winPromise;
+      clearTimeout(veilTimer);
+      veil?.remove();
+      if (data?.songWins != null) {
+        try {
+          const st = loadState() || state;
+          st.champSongWins = Number(data.songWins) || 0;
+          saveState(st);
+        } catch (_) {}
+      }
+      if (data?.milestone && data.participantNo) {
+        markMilestoneShown({ song: champ, artistId: state.neteaseArtistId });
+        showMilestoneSplash(data.participantNo, () => navigate("/champ"));
+        return;
+      }
+      navigate("/champ");
+    }
+  );
+}
+
+/** 总参与人数撞上 100 倍数时的惊喜彩蛋，结束后进入冠军页 */
+function showMilestoneSplash(participantNo, onDone) {
+  const existing = document.getElementById("round-splash");
+  if (existing) existing.remove();
+
+  const n = Number(participantNo) || 0;
+  const pretty = n.toLocaleString("zh-CN");
+  const sparks = Array.from({ length: 18 }, (_, i) => {
+    const left = 8 + ((i * 37) % 84);
+    const delay = ((i * 0.11) % 1.4).toFixed(2);
+    const dur = (1.6 + (i % 5) * 0.22).toFixed(2);
+    const size = 4 + (i % 4) * 2;
+    return `<span class="milestone-spark" style="--sx:${left}%;--sd:${delay}s;--sdu:${dur}s;--ss:${size}px"></span>`;
+  }).join("");
+
+  const el = document.createElement("div");
+  el.id = "round-splash";
+  el.className = "round-splash milestone-splash";
+  el.setAttribute("role", "dialog");
+  el.setAttribute("aria-live", "polite");
+  el.innerHTML = `
+    <div class="round-splash-bg" aria-hidden="true"></div>
+    <div class="milestone-sparks" aria-hidden="true">${sparks}</div>
+    <div class="round-splash-card">
+      <div class="round-splash-badge">里程碑彩蛋</div>
+      <p class="milestone-congrats">恭喜你！</p>
+      <p class="milestone-line">你是全站第 <em>${esc(pretty)}</em> 位参与者！</p>
+      <p class="milestone-tagline">正好卡在 ${esc(String(n))} · 运气爆棚</p>
+      <p class="round-splash-hint">点击或稍候进入冠军页</p>
+    </div>
+  `;
+  document.body.appendChild(el);
+  requestAnimationFrame(() => el.classList.add("is-on"));
+
+  let done = false;
+  let auto = null;
+  function finish() {
+    if (done) return;
+    done = true;
+    if (auto) clearTimeout(auto);
+    el.classList.remove("is-on");
+    el.classList.add("is-out");
+    setTimeout(() => {
+      el.remove();
+      onDone?.();
+    }, 320);
+  }
+
+  el.addEventListener("click", finish);
+  auto = setTimeout(finish, 4200);
+}
+
 function podiumCard(label, en, song, fallback) {
   if (!song) {
     return `
@@ -2649,7 +3088,13 @@ function podiumCard(label, en, song, fallback) {
   }
   return `
     <div class="podium-card">
-      ${imgTag(coverUrl(song, fallback), { alt: song.title, className: "podium-cover" })}
+      ${imgTag(coverUrl(song, fallback), {
+        alt: song.title,
+        className: "podium-cover",
+        size: IMAGE_SIZES.chip,
+        width: 48,
+        height: 48,
+      })}
       <div class="podium-copy">
         <div class="podium-label">${esc(label)} · ${esc(en)}</div>
         <div class="podium-title">${esc(song.title)}</div>
@@ -2662,13 +3107,16 @@ function openShareBracket(state) {
   const existing = document.getElementById("share-bracket");
   if (existing) existing.remove();
 
-  void warmShareCovers(state);
+  void getShareCardModule()
+    .then((mod) => mod.warmShareCovers(state))
+    .catch(() => {});
 
   const avatar = state.artistAvatar || "";
   const c = state.bracket.champion;
   const el = document.createElement("div");
   el.id = "share-bracket";
   el.className = "share-bracket";
+  // Light shell first so click paint stays responsive (INP).
   el.innerHTML = `
     <div class="share-bracket-panel">
       <header class="share-bracket-head">
@@ -2683,7 +3131,33 @@ function openShareBracket(state) {
           <button type="button" class="ghost-btn" id="share-close-btn">关闭</button>
         </div>
       </header>
-      <div class="share-bracket-stage">
+      <div class="share-bracket-stage" id="share-bracket-stage">
+        <p class="share-bracket-loading">对阵图加载中…</p>
+      </div>
+    </div>
+  `;
+  document.body.appendChild(el);
+  requestAnimationFrame(() => el.classList.add("is-on"));
+
+  /** @type {(() => void) | null} */
+  let fitShare = null;
+  const close = () => {
+    if (fitShare) window.removeEventListener("resize", fitShare);
+    const supportModal = document.getElementById("support-author-modal");
+    if (supportModal) supportModal.remove();
+    el.classList.remove("is-on");
+    setTimeout(() => el.remove(), 280);
+  };
+  el.querySelector("#share-close-btn").addEventListener("click", close);
+  el.addEventListener("click", (e) => {
+    if (e.target === el) close();
+  });
+
+  const mountHeavyShareBody = () => {
+    if (!el.isConnected) return;
+    const stage = el.querySelector("#share-bracket-stage");
+    if (!stage) return;
+    stage.innerHTML = `
         <div class="share-bracket-card" id="battle-card">
           <div class="share-bracket-brand brand-wordmark" aria-label="黑怕巅峰对决">
             <span class="brand-heipa">黑怕</span><span class="brand-duel">巅峰对决</span>
@@ -2694,7 +3168,7 @@ function openShareBracket(state) {
               <path fill="currentColor" d="M12 3.2a1 1 0 0 1 .7.3l3.5 3.5a1 1 0 1 1-1.4 1.4L13 6.6V15a1 1 0 1 1-2 0V6.6L8.2 8.4a1 1 0 1 1-1.4-1.4L10.3 3.5a1 1 0 0 1 .7-.3Z"/>
               <path fill="currentColor" d="M5 12a1 1 0 0 1 1 1v5h12v-5a1 1 0 1 1 2 0v6a1 1 0 0 1-1 1H5a1 1 0 0 1-1-1v-6a1 1 0 0 1 1-1Z"/>
             </svg>
-            <span>分享</span>
+            <span>${SHARE_CTA_LABEL}</span>
           </button>
           <div class="share-bracket-qr">
             <div class="share-bracket-qr-copy">
@@ -2705,13 +3179,14 @@ function openShareBracket(state) {
               <em class="share-bracket-slogan">给你的本命 RapStar 办一场真正的说唱巅峰对决</em>
             </div>
             <canvas id="share-qr-canvas" width="66" height="66" aria-label="网站二维码"></canvas>
+            <div class="share-support-wrap">
+              <button type="button" class="share-support-btn" id="share-support-btn">支持作者</button>
+            </div>
           </div>
         </div>
-      </div>
-    </div>
-  `;
-  document.body.appendChild(el);
-  const fitShare = () => {
+    `;
+
+  fitShare = () => {
     const fit = el.querySelector("#bracket-fit");
     const board = el.querySelector("#bracket-board");
     if (!fit || !board) return;
@@ -2723,40 +3198,34 @@ function openShareBracket(state) {
     });
   };
   requestAnimationFrame(() => {
-    el.classList.add("is-on");
-    fitShare();
-    requestAnimationFrame(fitShare);
+    fitShare?.();
+    requestAnimationFrame(() => fitShare?.());
   });
   const qrCanvas = el.querySelector("#share-qr-canvas");
   if (qrCanvas) {
-    QRCode.toCanvas(qrCanvas, SITE_URL, {
-      width: 66,
-      margin: 1,
-      color: { dark: "#111110", light: "#ffffff" },
-      errorCorrectionLevel: "M",
-    }).catch(() => {});
+    void getQrCodeModule()
+      .then((mod) =>
+        mod.default.toCanvas(qrCanvas, SITE_URL, {
+          width: 66,
+          margin: 1,
+          color: { dark: "#111110", light: "#ffffff" },
+          errorCorrectionLevel: "M",
+        })
+      )
+      .catch(() => {});
   }
   el.querySelectorAll("img").forEach((img) => {
-    if (!img.complete) img.addEventListener("load", fitShare, { once: true });
+    if (!img.complete) img.addEventListener("load", () => fitShare?.(), { once: true });
   });
   window.addEventListener("resize", fitShare, { passive: true });
 
-  const close = () => {
-    window.removeEventListener("resize", fitShare);
-    el.classList.remove("is-on");
-    setTimeout(() => el.remove(), 280);
-  };
-  el.querySelector("#share-close-btn").addEventListener("click", close);
-  el.addEventListener("click", (e) => {
-    if (e.target === el) close();
-  });
-
-  const cardEl = el.querySelector("#battle-card");
   const shareBtn = el.querySelector("#share-go-btn");
   const shareLabel = shareBtn?.querySelector("span");
   const saveBtn = el.querySelector("#share-save-btn");
+  const supportBtn = el.querySelector("#share-support-btn");
   /** @type {{ file: File, title: string, text: string } | null} */
   let shareReady = null;
+  let shareImageReadyTracked = false;
   if (shareBtn && shareLabel) {
     shareBtn.disabled = true;
     shareBtn.classList.add("is-busy");
@@ -2769,10 +3238,14 @@ function openShareBracket(state) {
 
   const setShareReady = (ready) => {
     shareReady = ready;
+    if (!shareImageReadyTracked) {
+      shareImageReadyTracked = true;
+      trackEvent("share_image_ready");
+    }
     if (shareBtn && shareLabel) {
       shareBtn.disabled = false;
       shareBtn.classList.remove("is-busy", "is-fail");
-      shareLabel.textContent = "分享";
+      shareLabel.textContent = SHARE_CTA_LABEL;
     }
     if (saveBtn) {
       saveBtn.disabled = false;
@@ -2795,9 +3268,52 @@ function openShareBracket(state) {
     }
   };
 
-  const prepShare = (async () => prepareNativeSharePayload(state))()
-    .then(setShareReady)
-    .catch(setShareFail);
+  void prepareNativeSharePayload(state).then(setShareReady).catch(setShareFail);
+
+  const closeSupportModal = () => {
+    const modal = document.getElementById("support-author-modal");
+    if (!modal) return;
+    modal.classList.remove("is-on");
+    setTimeout(() => modal.remove(), 180);
+  };
+
+  const openSupportModal = () => {
+    closeSupportModal();
+    const modal = document.createElement("div");
+    modal.id = "support-author-modal";
+    modal.className = "support-author-modal";
+    modal.innerHTML = `
+      <div class="support-author-panel" role="dialog" aria-modal="true" aria-labelledby="support-author-title">
+        <header class="support-author-head">
+          <h3 id="support-author-title">支持作者</h3>
+          <button type="button" class="support-author-close" id="support-author-close" aria-label="关闭">×</button>
+        </header>
+        <p class="support-author-intro">
+          如果你喜欢 HeipaClub，可以支持一下作者，来帮助<span class="support-author-vision">网站持续运营</span>~
+        </p>
+        <div class="support-author-qrs is-single">
+          <figure class="support-author-qr-item">
+            <img src="${SUPPORT_AUTHOR_QR_SRC}" alt="支持作者赞赏码" loading="lazy" />
+            <figcaption>赞赏码</figcaption>
+          </figure>
+        </div>
+        <button type="button" class="support-author-done" id="support-author-done">知道了</button>
+      </div>
+    `;
+    document.body.appendChild(modal);
+    requestAnimationFrame(() => modal.classList.add("is-on"));
+    const closeModal = () => closeSupportModal();
+    modal.querySelector("#support-author-close")?.addEventListener("click", closeModal);
+    modal.querySelector("#support-author-done")?.addEventListener("click", closeModal);
+    modal.addEventListener("click", (evt) => {
+      if (evt.target === modal) closeModal();
+    });
+  };
+
+  supportBtn?.addEventListener("click", () => {
+    openSupportModal();
+  });
+
 
   const downloadShareFile = (file) => {
     const url = URL.createObjectURL(file);
@@ -2861,7 +3377,7 @@ function openShareBracket(state) {
     if (typeof navigator.share !== "function") {
       if (shareLabel) shareLabel.textContent = "请用系统分享";
       setTimeout(() => {
-        if (shareLabel) shareLabel.textContent = "分享";
+        if (shareLabel) shareLabel.textContent = SHARE_CTA_LABEL;
       }, 1400);
       return;
     }
@@ -2882,7 +3398,7 @@ function openShareBracket(state) {
     if (!payload) {
       if (shareLabel) shareLabel.textContent = "暂不支持分享";
       setTimeout(() => {
-        if (shareLabel) shareLabel.textContent = "分享";
+        if (shareLabel) shareLabel.textContent = SHARE_CTA_LABEL;
       }, 1400);
       return;
     }
@@ -2891,17 +3407,22 @@ function openShareBracket(state) {
       if (shareLabel) {
         shareLabel.textContent = "分享失败";
         setTimeout(() => {
-          shareLabel.textContent = "分享";
+          shareLabel.textContent = SHARE_CTA_LABEL;
         }, 1400);
       }
     });
   });
+
+  };
+
+  requestAnimationFrame(mountHeavyShareBody);
 }
 /** Prefetch File for Web Share API — Music Cup style Canvas draw (fast + crisp). */
 async function prepareNativeSharePayload(state) {
   const { champion } = podiumFromBracket(state.bracket);
   const title = `${state.artistName || ""} 本命曲对阵图`;
   const textBody = `冠军：${champion?.title || ""} · 扫码玩 heipaclub.com`;
+  const { buildShareCardBlob } = await getShareCardModule();
   const blob = await buildShareCardBlob(state);
   const file = new File([blob], "HeipaClub-Bracket.jpg", {
     type: blob.type || "image/jpeg",
@@ -3018,7 +3539,7 @@ function pickButton(side, song, fallback) {
   return `
     <div class="pick-wrap">
       <button type="button" class="pick" data-side="${side}">
-        ${imgTag(coverUrl(song, fallback), { alt: song.title, className: "pick-cover" })}
+        ${progressivePickCover(song, fallback)}
         <div class="pick-copy">
           <div class="side">TRACK ${side.toUpperCase()}${labelBadge}</div>
           <h2 class="title">${esc(song.title)}</h2>
@@ -3037,8 +3558,23 @@ function renderChamp(state) {
   const c = state.bracket.champion;
   const avatar = state.artistAvatar || "";
   const { runnerUp, semis } = podiumFromBracket(state.bracket);
+  const songId = String(c?.neteaseId || c?.id || "").trim();
+  let initialWins = Number(state.champSongWins || 0) || 0;
+  if (!initialWins && songId) {
+    try {
+      initialWins = Number(sessionStorage.getItem(`cn-rap-cup:song-wins:${songId}`) || 0) || 0;
+    } catch (_) {}
+  }
 
-  void warmShareCovers(state);
+  void getShareCardModule()
+    .then((mod) => mod.warmShareCovers(state))
+    .catch(() => {});
+
+  const songTitleHtml = `<span class="champ-social-song">「${esc(c.title)}」</span>`;
+  const socialHtml =
+    initialWins > 0
+      ? `有 ${initialWins.toLocaleString("zh-CN")} 人和你一样选择了${songTitleHtml}作为冠军歌曲`
+      : `正在统计有多少人和你一样选择了${songTitleHtml}…`;
 
   app.innerHTML = shell(
     `
@@ -3055,7 +3591,19 @@ function renderChamp(state) {
         </p>
         <p class="champ-cup-champion-word">C H A M P I O N</p>
         <div class="champ-cup-cover-wrap">
-          ${imgTag(coverUrl(c, avatar), { alt: c.title, className: "champ-cup-cover" })}
+          ${imgTag(coverUrl(c, avatar), {
+            alt: c.title,
+            className: "champ-cup-cover",
+            size: IMAGE_SIZES.champ,
+            loading: "eager",
+            fetchPriority: "high",
+            width: 280,
+            height: 280,
+            sizes: "(max-width: 640px) 72vw, 280px",
+          })}
+          <button type="button" class="champ-cover-play" id="champ-cover-play" aria-label="试听冠军曲">
+            <svg viewBox="0 0 24 24" width="18" height="18" aria-hidden="true"><path fill="currentColor" d="M8 5.5v13l11-6.5L8 5.5z"/></svg>
+          </button>
         </div>
         <h1 class="champ-cup-title">${esc(c.title)}</h1>
         <p class="champ-cup-meta">${esc(metaLine(c))}</p>
@@ -3067,10 +3615,12 @@ function renderChamp(state) {
         ${podiumCard("四强", "SEMI", semis[1], avatar)}
       </div>
 
-      <div id="player-mount" class="player-mount champ-player"></div>
+      <p class="champ-social-proof" id="champ-social-proof">${socialHtml}</p>
+
+      <div id="player-mount" class="player-mount champ-player" hidden></div>
 
       <div class="champ-cup-actions">
-        <button type="button" class="primary-btn share-bracket-btn" id="share-bracket-btn">分享我的对阵图</button>
+        <button type="button" class="primary-btn share-bracket-btn" id="share-bracket-btn">生成专属于你的对阵图</button>
         <div class="champ-cup-secondary">
           <button type="button" class="ghost-btn" id="again-same">再来一场</button>
           <button type="button" class="ghost-btn" id="again-home">${
@@ -3087,24 +3637,99 @@ function renderChamp(state) {
   );
   bindBack();
 
-  const player = createPlayer(document.getElementById("player-mount"));
-  player.load(c, {
-    autoplay: false,
-    artistName: c.rosterArtistName || state.artistName || "",
-    artistAliases: [state.artistSearch, c.rosterArtistName].filter(Boolean),
-    mapArtistId: c.rosterArtistId || state.artistId || "",
+  const socialEl = document.getElementById("champ-social-proof");
+  const paintSocial = (wins) => {
+    const n = Number(wins || 0);
+    if (!socialEl || n <= 0) return;
+    socialEl.innerHTML = `有 ${n.toLocaleString("zh-CN")} 人和你一样选择了<span class="champ-social-song">「${esc(
+      c.title
+    )}」</span>作为冠军歌曲`;
+  };
+
+  let player = null;
+  const openChampPlayer = async () => {
+    const mount = document.getElementById("player-mount");
+    const playBtn = document.getElementById("champ-cover-play");
+    if (!mount) return;
+    mount.hidden = false;
+    playBtn?.classList.add("is-open");
+    if (!player) {
+      player = createPlayer(mount);
+    }
+    await player.load(c, {
+      autoplay: true,
+      artistName: c.rosterArtistName || state.artistName || "",
+      artistAliases: [state.artistSearch, c.rosterArtistName].filter(Boolean),
+      mapArtistId: c.rosterArtistId || state.artistId || "",
+    });
+    const card = document.getElementById("cup-player");
+    if (card) card.hidden = false;
+  };
+  document.getElementById("champ-cover-play")?.addEventListener("click", () => {
+    openChampPlayer().catch(() => {});
   });
-  document.getElementById("cup-player").hidden = false;
 
-  // still report wins silently
-  reportChampionWin({
-    song: c,
-    artistId: state.neteaseArtistId,
-    artistName: state.artistName,
-    artistAvatar: avatar,
-  }).catch(() => {});
+  // still report wins silently（决冠时已报过则 session 去重跳过）
+  {
+    const payload = {
+      song: c,
+      artistId: state.neteaseArtistId,
+      artistName: state.artistName,
+      artistAvatar: avatar,
+    };
+    if (state.cupType === "label-beef" && state.labels?.length >= 2) {
+      const winnerId = c.labelId || "";
+      const winnerName = c.labelName || "";
+      const loser =
+        state.labels.find((l) => l.id && l.id !== winnerId) ||
+        state.labels.find((l) => l.name && l.name !== winnerName) ||
+        state.labels[1];
+      payload.cupType = "label-beef";
+      payload.songArtist = c.rosterArtistName || c.artist || "";
+      payload.artistName = payload.songArtist;
+      payload.winnerLabelId = winnerId;
+      payload.winnerLabelName = winnerName;
+      payload.loserLabelId = loser?.id || "";
+      payload.loserLabelName = loser?.name || "";
+    }
+    reportChampionWin(payload)
+      .then(async (data) => {
+        if (data?.songWins != null) {
+          paintSocial(data.songWins);
+          try {
+            const st = loadState() || state;
+            st.champSongWins = Number(data.songWins) || 0;
+            saveState(st);
+          } catch (_) {}
+          return;
+        }
+        if (initialWins > 0) return;
+        // 去重跳过且无缓存时，按歌名从榜单取夺冠次数
+        try {
+          const rank = await fetchSongRank({ limit: 20, q: c.title || "" });
+          const hit = (rank.items || []).find(
+            (item) =>
+              String(item.songId || "") === songId ||
+              String(item.title || "").toLowerCase() === String(c.title || "").toLowerCase()
+          );
+          if (hit?.wins) paintSocial(hit.wins);
+        } catch (_) {}
+      })
+      .catch(() => {});
+  }
 
-  document.getElementById("share-bracket-btn").addEventListener("click", () => openShareBracket(state));
+  const shareOpenBtn = document.getElementById("share-bracket-btn");
+  const warmShare = () => {
+    void getShareCardModule()
+      .then((mod) => mod.warmShareCovers(state))
+      .catch(() => {});
+  };
+  shareOpenBtn?.addEventListener("pointerdown", warmShare, { once: true, passive: true });
+  shareOpenBtn?.addEventListener("mouseenter", warmShare, { once: true, passive: true });
+  shareOpenBtn?.addEventListener("click", () => {
+    trackEvent("share_open");
+    openShareBracket(state);
+  });
   document.getElementById("again-same").addEventListener("click", () => {
     clearState();
     if (state.cupType === "label-beef") navigate("/label-beef");
@@ -3118,6 +3743,18 @@ function renderChamp(state) {
 
 async function renderRank(tab = "songs") {
   let region = "cn"; // 中文 | 欧美
+  const rankListSkeleton = (rows = 10) =>
+    Array.from({ length: rows }, () => `
+      <article class="rank-row rank-row-skeleton" aria-hidden="true">
+        <div class="rank-num">·</div>
+        <div class="rank-cover-skel"></div>
+        <div class="rank-meta">
+          <div class="rank-skel-line"></div>
+          <div class="rank-skel-line short"></div>
+        </div>
+      </article>
+    `).join("");
+
   app.innerHTML = shell(
     `<section class="rank-page"><p class="loading-line">加载排行榜…</p></section>`,
     { back: "/" }
@@ -3125,10 +3762,17 @@ async function renderRank(tab = "songs") {
   bindBack();
 
   const tabHref = (t) =>
-    t === "artists" ? "/rank/artists" : t === "labels" ? "/rank/labels" : "/rank";
+    t === "artists"
+      ? "/rank/artists"
+      : t === "labels"
+        ? "/rank/labels"
+        : t === "hangla"
+          ? "/rank/hangla"
+          : "/rank";
 
   const paint = async (active, q = "") => {
     const showRegion = active === "songs" || active === "artists";
+    const showSearch = active !== "hangla";
     app.innerHTML = shell(
       `
       <section class="rank-page">
@@ -3140,6 +3784,7 @@ async function renderRank(tab = "songs") {
           <button type="button" class="mode-chip ${active === "songs" ? "active" : ""}" data-rank-tab="songs">歌曲</button>
           <button type="button" class="mode-chip ${active === "artists" ? "active" : ""}" data-rank-tab="artists">歌手</button>
           <button type="button" class="mode-chip ${active === "labels" ? "active" : ""}" data-rank-tab="labels">厂牌</button>
+          <button type="button" class="mode-chip ${active === "hangla" ? "active" : ""}" data-rank-tab="hangla">夯拉</button>
         </div>
         ${
           showRegion
@@ -3149,57 +3794,404 @@ async function renderRank(tab = "songs") {
         </div>`
             : ""
         }
-        <div class="search-row">
-          <input id="rank-search" type="search" placeholder="${
-            active === "songs"
-              ? "搜索歌曲…"
-              : active === "artists"
-                ? "搜索歌手…"
-                : "搜索厂牌…"
-          }" value="${esc(q)}" autocomplete="off" />
+        <div class="search-row search-row-with-total">
+          ${
+            showSearch
+              ? `<input id="rank-search" type="search" placeholder="${
+                  active === "songs"
+                    ? "搜索歌曲…"
+                    : active === "artists"
+                      ? "搜索歌手…"
+                      : "搜索厂牌…"
+                }" value="${esc(q)}" autocomplete="off" />`
+              : `<p class="rank-hangla-hint">完成「从夯到拉」后计入 · 左栏最夯 · 右栏最拉</p>`
+          }
+          <div class="rank-total-wins rank-total-wins--accent" id="rank-total-wins" aria-live="polite">
+            <span class="rank-total-wins-label">总参与人数</span>
+            <strong>—</strong>
+          </div>
+          <div class="rank-total-wins" id="rank-song-count" aria-live="polite">
+            <span class="rank-total-wins-label">已入围歌曲数</span>
+            <strong>—</strong>
+          </div>
+          <p class="rank-anti-brush-note">
+            🔥 战绩已开启防刷保护<br />
+            （每人每天最多计入5次有效评选）
+          </p>
         </div>
-        <div id="rank-list" class="rank-list"><p class="loading-line">加载中…</p></div>
-        <div id="player-mount" class="player-mount"></div>
+        <div id="rank-list" class="rank-list${active === "hangla" ? " rank-list-hangla" : ""}">${rankListSkeleton()}</div>
       </section>
     `,
       { back: "/" }
     );
     bindBack();
 
-    const player = createPlayer(document.getElementById("player-mount"));
     let timer = null;
     const input = document.getElementById("rank-search");
+    const RANK_PAGE = 25;
+    /** @type {any[]} */
+    let allItems = [];
+    let shownCount = 0;
+    /** @type {IntersectionObserver | null} */
+    let moreObserver = null;
+
+    const formatWinRate = (wins, battles) => {
+      const b = Number(battles || 0);
+      const w = Number(wins || 0);
+      if (b <= 0) return null;
+      return `${Math.round((w / b) * 1000) / 10}%`;
+    };
+
+    const songArtistLine = (item) => {
+      let artist = String(item.artist || "").trim();
+      // 旧厂牌混战曾把「A vs B」写入 artist；优先用 artistId 还原真实歌手名
+      if (/^.+\s+vs\s+.+$/i.test(artist)) {
+        const nid = String(item.artistId || "").trim();
+        const local = nid
+          ? ARTISTS.find((a) => String(a.neteaseArtistId || "") === nid)
+          : null;
+        artist = String(local?.name || "").trim();
+      }
+      return `${artist || "未知歌手"} · 单曲夺冠 ${Number(item.wins || 0).toLocaleString("zh-CN")} 次`;
+    };
+
+    const renderHangLaCol = (title, items, kind) => {
+      const rows = (items || [])
+        .map((item, i) => {
+          const rank = i + 1;
+          const rankClass = rank <= 3 ? `top${rank}` : "";
+          const titleClass = rank <= 3 ? `rank-title top${rank}` : "rank-title";
+          const countLabel = kind === "hang" ? "获夯" : "拉完了";
+          return `
+            <article class="rank-row rank-row-hangla">
+              <div class="rank-num ${rankClass}">${rank}</div>
+              ${imgTag(item.avatar, {
+                alt: item.name,
+                className: "rank-cover round",
+                size: IMAGE_SIZES.list,
+                width: 40,
+                height: 40,
+              })}
+              <div class="rank-meta">
+                <div class="${titleClass}">${esc(item.name)}</div>
+                <div class="rank-desc">${countLabel} ${Number(item.wins || 0).toLocaleString("zh-CN")} 次</div>
+              </div>
+            </article>`;
+        })
+        .join("");
+      return `
+        <div class="rank-hangla-col rank-hangla-col--${kind}">
+          <h2 class="rank-hangla-col-title">${esc(title)}</h2>
+          <div class="rank-hangla-col-list">
+            ${rows || `<p class="loading-line">暂无数据</p>`}
+          </div>
+        </div>`;
+    };
+
+    const renderRankRow = (item, i, activeTab) => {
+      const rank = i + 1;
+      const rankClass = rank <= 3 ? `top${rank}` : "";
+      const titleClass = rank <= 3 ? `rank-title top${rank}` : "rank-title";
+      if (activeTab === "songs") {
+        return `
+          <article class="rank-row">
+            <div class="rank-num ${rankClass}">${rank}</div>
+            ${imgTag(item.cover, {
+              alt: item.title,
+              className: "rank-cover",
+              size: IMAGE_SIZES.list,
+              width: 52,
+              height: 52,
+            })}
+            <div class="rank-meta">
+              <div class="${titleClass}">${esc(item.title)}</div>
+              <div class="rank-desc">${esc(songArtistLine(item))}</div>
+            </div>
+          </article>`;
+      }
+      if (activeTab === "labels") {
+        const rate = formatWinRate(item.wins, item.battles);
+        const desc = rate
+          ? `${item.city || "厂牌"} · ${item.members} 人 · 胜率 ${rate} · 对战 ${Number(item.battles || 0).toLocaleString("zh-CN")} 场`
+          : `${item.city || "厂牌"} · ${item.members} 人 · 暂无对战`;
+        return `
+          <article class="rank-row rank-row-label">
+            <div class="rank-num ${rankClass}">${rank}</div>
+            ${imgTag(item.avatar, {
+              alt: item.name,
+              className: "rank-cover round",
+              size: IMAGE_SIZES.list,
+              width: 52,
+              height: 52,
+            })}
+            <div class="rank-meta">
+              <div class="${titleClass}">${esc(item.name)}</div>
+              <div class="rank-desc">${esc(desc)}</div>
+            </div>
+            <button type="button" class="rank-matchup-btn" data-label-matchup="${esc(
+              item.labelId
+            )}" data-label-name="${esc(item.name)}">对阵明细</button>
+          </article>`;
+      }
+      return `
+        <article class="rank-row">
+          <div class="rank-num ${rankClass}">${rank}</div>
+          ${imgTag(item.avatar || item.cover, {
+            alt: item.name,
+            className: "rank-cover round",
+            size: IMAGE_SIZES.list,
+            width: 52,
+            height: 52,
+          })}
+          <div class="rank-meta">
+            <div class="${titleClass}">${esc(item.name)}</div>
+            <div class="rank-desc">单曲夺冠 ${Number(item.wins || 0).toLocaleString("zh-CN")} 次</div>
+          </div>
+        </article>`;
+    };
+
+    const openLabelMatchupModal = async (labelId, labelName) => {
+      const existing = document.getElementById("label-matchup-modal");
+      if (existing) existing.remove();
+      const modal = document.createElement("div");
+      modal.id = "label-matchup-modal";
+      modal.className = "label-matchup-modal";
+      modal.innerHTML = `
+        <div class="label-matchup-panel" role="dialog" aria-modal="true" aria-labelledby="label-matchup-title">
+          <header class="label-matchup-head">
+            <h3 id="label-matchup-title">${esc(labelName || "厂牌")} · 对阵明细</h3>
+            <button type="button" class="label-matchup-close" aria-label="关闭">×</button>
+          </header>
+          <div class="label-matchup-body"><p class="loading-line">加载中…</p></div>
+          <button type="button" class="label-matchup-done">知道了</button>
+        </div>
+      `;
+      document.body.appendChild(modal);
+      requestAnimationFrame(() => modal.classList.add("is-on"));
+      const close = () => {
+        modal.classList.remove("is-on");
+        setTimeout(() => modal.remove(), 180);
+      };
+      modal.querySelector(".label-matchup-close")?.addEventListener("click", close);
+      modal.querySelector(".label-matchup-done")?.addEventListener("click", close);
+      modal.addEventListener("click", (e) => {
+        if (e.target === modal) close();
+      });
+      const body = modal.querySelector(".label-matchup-body");
+      try {
+        const data = await fetchLabelBeefMatchups(labelId);
+        const items = data.items || [];
+        if (!items.length) {
+          body.innerHTML = `<p class="loading-line">暂无对阵记录，去打一场厂牌巅峰混战吧</p>`;
+          return;
+        }
+        body.innerHTML = `
+          <ul class="label-matchup-list">
+            ${items
+              .map((row, idx) => {
+                const opp =
+                  getLabel(row.opponentId)?.name || row.opponentName || row.opponentId;
+                const rate = formatWinRate(row.wins, row.battles);
+                const champs = Array.isArray(row.champions) ? row.champions : [];
+                return `<li data-matchup-idx="${idx}">
+                  <div class="label-matchup-row-top">
+                    <div class="label-matchup-row-meta">
+                      <strong>vs ${esc(opp)}</strong>
+                      <span>${rate ? `胜率 ${esc(rate)}` : "暂无"} · 对战 ${Number(
+                        row.battles || 0
+                      ).toLocaleString("zh-CN")} 场 · 胜 ${Number(row.wins || 0).toLocaleString(
+                        "zh-CN"
+                      )} 场</span>
+                    </div>
+                    <button type="button" class="label-champ-toggle" aria-expanded="false" data-champ-toggle="${idx}">冠军单曲</button>
+                  </div>
+                  <div class="label-champ-panel" hidden data-champ-panel="${idx}">
+                    ${
+                      champs.length
+                        ? `<ul class="label-champ-list">${champs
+                            .map(
+                              (c) => `<li>
+                          ${imgTag(c.cover, {
+                            alt: c.title,
+                            className: "label-champ-cover",
+                            size: IMAGE_SIZES.list,
+                            width: 36,
+                            height: 36,
+                          })}
+                          <div class="label-champ-meta">
+                            <strong>${esc(c.title || "未知曲目")}</strong>
+                            <span>${esc(c.artist || "未知歌手")} · 夺冠 ${Number(
+                              c.wins || 0
+                            ).toLocaleString("zh-CN")} 次</span>
+                          </div>
+                        </li>`
+                            )
+                            .join("")}</ul>`
+                        : `<p class="label-champ-empty">暂无记录，完成混战后会出现</p>`
+                    }
+                  </div>
+                </li>`;
+              })
+              .join("")}
+          </ul>
+        `;
+        body.querySelectorAll("[data-champ-toggle]").forEach((btn) => {
+          btn.addEventListener("click", () => {
+            const idx = btn.getAttribute("data-champ-toggle");
+            const panel = body.querySelector(`[data-champ-panel="${idx}"]`);
+            if (!panel) return;
+            const open = panel.hasAttribute("hidden");
+            if (open) panel.removeAttribute("hidden");
+            else panel.setAttribute("hidden", "");
+            btn.setAttribute("aria-expanded", open ? "true" : "false");
+            btn.classList.toggle("is-on", open);
+          });
+        });
+      } catch {
+        body.innerHTML = `<p class="loading-line">对阵明细加载失败</p>`;
+      }
+    };
+
+    const bindRankMore = (box) => {
+      moreObserver?.disconnect();
+      moreObserver = null;
+      const sentinel = box.querySelector("#rank-more-sentinel");
+      if (!sentinel || shownCount >= allItems.length) {
+        sentinel?.remove();
+        return;
+      }
+      moreObserver = new IntersectionObserver(
+        (entries) => {
+          if (!entries.some((e) => e.isIntersecting)) return;
+          const next = allItems.slice(shownCount, shownCount + RANK_PAGE);
+          if (!next.length) {
+            sentinel.remove();
+            moreObserver?.disconnect();
+            return;
+          }
+          const html = next.map((item, i) => renderRankRow(item, shownCount + i, active)).join("");
+          sentinel.insertAdjacentHTML("beforebegin", html);
+          shownCount += next.length;
+          if (active === "labels") {
+            box.querySelectorAll("[data-label-matchup]").forEach((btn) => {
+              if (btn.dataset.bound === "1") return;
+              btn.dataset.bound = "1";
+              btn.addEventListener("click", (e) => {
+                e.stopPropagation();
+                openLabelMatchupModal(btn.dataset.labelMatchup, btn.dataset.labelName);
+              });
+            });
+          }
+          if (shownCount >= allItems.length) {
+            sentinel.remove();
+            moreObserver?.disconnect();
+          }
+        },
+        { root: null, rootMargin: "200px 0px", threshold: 0 }
+      );
+      moreObserver.observe(sentinel);
+    };
+
+    const formatStat = (n) => {
+      const value = Number(n);
+      return Number.isFinite(value) ? value.toLocaleString("zh-CN") : "—";
+    };
+
+    const updateRankStatsUi = ({ totalWins, songCount } = {}) => {
+      const winsEl = document.getElementById("rank-total-wins");
+      if (winsEl && totalWins != null) {
+        winsEl.innerHTML = `<span class="rank-total-wins-label">总参与人数</span><strong>${formatStat(
+          totalWins
+        )}</strong>`;
+      }
+      const songsEl = document.getElementById("rank-song-count");
+      if (songsEl && songCount != null) {
+        songsEl.innerHTML = `<span class="rank-total-wins-label">已入围歌曲数</span><strong>${formatStat(
+          songCount
+        )}</strong>`;
+      }
+    };
 
     const loadList = async (query) => {
       const box = document.getElementById("rank-list");
       if (!box) return;
-      box.innerHTML = `<p class="loading-line">加载中…</p>`;
+      moreObserver?.disconnect();
+      moreObserver = null;
+      shownCount = 0;
+      allItems = [];
+      box.innerHTML = rankListSkeleton();
       try {
         let items = [];
         let updatedAt = null;
+        let totalWins = null;
+        let songCount = null;
+        // Pull a large board once; UI reveals it in pages of RANK_PAGE on scroll.
+        if (active === "hangla") {
+          const data = await fetchHangLaRank({ limit: 100 });
+          updatedAt = data.updatedAt;
+          totalWins = data.totalWins;
+          songCount = data.songCount;
+          updateRankStatsUi({ totalWins, songCount });
+          const sub = document.getElementById("rank-sub");
+          if (sub) {
+            sub.textContent = updatedAt
+              ? `夯拉榜 · ${String(updatedAt).slice(0, 10)}`
+              : "夯拉榜";
+          }
+          const hang = data.hang || [];
+          const lale = data.lale || [];
+          if (!hang.length && !lale.length) {
+            box.innerHTML = `<p class="loading-line">暂无数据，去玩一局「从夯到拉」吧</p>`;
+            return;
+          }
+          box.classList.add("rank-list-hangla");
+          box.innerHTML = `
+            <div class="rank-hangla-board">
+              ${renderHangLaCol("最夯榜", hang, "hang")}
+              ${renderHangLaCol("最拉榜", lale, "lale")}
+            </div>`;
+          return;
+        }
         if (active === "labels") {
-          const data = await fetchArtistRank({ limit: 200, q: "" });
+          const data = await fetchLabelBeefRank({ limit: 500, q: "" });
           updatedAt = data.updatedAt;
-          items = filterLabelRank(buildLabelRank(data.items || []), query);
+          totalWins = data.totalWins;
+          songCount = data.songCount;
+          items = filterLabelRank(mergeLabelBeefRank(data.items || []), query);
         } else if (active === "songs") {
-          const data = await fetchSongRank({ limit: 200, q: query });
+          const data = await fetchSongRank({ limit: 2000, q: query });
           updatedAt = data.updatedAt;
+          totalWins = data.totalWins;
+          songCount = data.songCount;
           items = filterRankItemsByRegion(data.items || [], region, "songs");
         } else {
-          const data = await fetchArtistRank({ limit: 200, q: query });
+          const data = await fetchArtistRank({ limit: 2000, q: query });
           updatedAt = data.updatedAt;
+          totalWins = data.totalWins;
+          songCount = data.songCount;
           items = filterRankItemsByRegion(data.items || [], region, "artists");
         }
 
+        if (totalWins == null || songCount == null) {
+          const meta = await fetchRankMeta();
+          if (totalWins == null) totalWins = meta.totalWins;
+          if (songCount == null) songCount = meta.songCount;
+        }
+        updateRankStatsUi({ totalWins, songCount });
+
         const sub = document.getElementById("rank-sub");
         if (sub) {
-          const board =
-            active === "labels"
-              ? "厂牌榜"
-              : `${region === "west" ? "欧美" : "中文"}${active === "songs" ? "单曲" : "歌手"}榜`;
-          sub.textContent = updatedAt
-            ? `${board} · ${String(updatedAt).slice(0, 10)}`
-            : board;
+          if (active === "songs") {
+            sub.textContent = "实时更新冠军单曲排行";
+          } else {
+            const board =
+              active === "labels"
+                ? "厂牌榜"
+                : `${region === "west" ? "欧美" : "中文"}歌手榜`;
+            sub.textContent = updatedAt
+              ? `${board} · ${String(updatedAt).slice(0, 10)}`
+              : board;
+          }
         }
 
         if (!items.length) {
@@ -3207,62 +4199,26 @@ async function renderRank(tab = "songs") {
           return;
         }
 
-        box.innerHTML = items
-          .map((item, i) => {
-            const rank = i + 1;
-            const rankClass = rank <= 3 ? `top${rank}` : "";
-            if (active === "songs") {
-              return `
-                <article class="rank-row">
-                  <div class="rank-num ${rankClass}">${rank}</div>
-                  ${imgTag(item.cover, { alt: item.title, className: "rank-cover" })}
-                  <div class="rank-meta">
-                    <div class="rank-title">${esc(item.title)}</div>
-                    <div class="rank-desc">${esc(item.artist)} · 单曲夺冠 ${Number(item.wins || 0).toLocaleString("zh-CN")} 次</div>
-                  </div>
-                  <button type="button" class="rank-play" data-song-id="${esc(item.songId)}" data-title="${esc(item.title)}" data-artist="${esc(item.artist)}" data-cover="${esc(item.cover || "")}" aria-label="试听">▶</button>
-                </article>`;
-            }
-            if (active === "labels") {
-              return `
-                <article class="rank-row">
-                  <div class="rank-num ${rankClass}">${rank}</div>
-                  ${imgTag(item.avatar, { alt: item.name, className: "rank-cover round" })}
-                  <div class="rank-meta">
-                    <div class="rank-title">${esc(item.name)}</div>
-                    <div class="rank-desc">${esc(item.city || "厂牌")} · ${item.members} 人 · 成员夺冠累计 ${Number(item.wins || 0).toLocaleString("zh-CN")} 次</div>
-                  </div>
-                </article>`;
-            }
-            return `
-              <article class="rank-row">
-                <div class="rank-num ${rankClass}">${rank}</div>
-                ${imgTag(item.avatar || item.cover, { alt: item.name, className: "rank-cover round" })}
-                <div class="rank-meta">
-                  <div class="rank-title">${esc(item.name)}</div>
-                  <div class="rank-desc">单曲夺冠 ${Number(item.wins || 0).toLocaleString("zh-CN")} 次</div>
-                </div>
-              </article>`;
-          })
-          .join("");
-
-        box.querySelectorAll("[data-song-id]").forEach((btn) => {
-          btn.addEventListener("click", () => {
-            player.load(
-              {
-                title: btn.dataset.title,
-                artist: btn.dataset.artist,
-                cover: btn.dataset.cover,
-                neteaseId: btn.dataset.songId,
-              },
-              {
-                autoplay: true,
-                artistName: btn.dataset.artist || "",
-                artistAliases: [btn.dataset.artist].filter(Boolean),
-              }
-            );
+        allItems = items;
+        const first = allItems.slice(0, RANK_PAGE);
+        shownCount = first.length;
+        const more =
+          shownCount < allItems.length
+            ? `<div id="rank-more-sentinel" class="rank-more-sentinel" aria-hidden="true"></div>`
+            : "";
+        box.classList.remove("rank-list-hangla");
+        box.innerHTML =
+          first.map((item, i) => renderRankRow(item, i, active)).join("") + more;
+        bindRankMore(box);
+        if (active === "labels") {
+          box.querySelectorAll("[data-label-matchup]").forEach((btn) => {
+            btn.dataset.bound = "1";
+            btn.addEventListener("click", (e) => {
+              e.stopPropagation();
+              openLabelMatchupModal(btn.dataset.labelMatchup, btn.dataset.labelName);
+            });
           });
-        });
+        }
       } catch (e) {
         box.innerHTML = `<p class="loading-line">排行榜加载失败</p>`;
       }

@@ -2,6 +2,7 @@
  * Hybrid player: ALWAYS try iTunes first, NetEase only as fallback.
  */
 
+import { IMAGE_SIZES, optimizedImageUrl } from "./artwork.js";
 import { neteaseSongPage, songPlayUrl } from "./netease.js";
 import { resolvePlaySource } from "./itunes.js";
 
@@ -81,7 +82,8 @@ export function createPlayer(root) {
     const meta = [song.artist, song.album || song.collection].filter(Boolean).join(" · ");
     sub.textContent = [meta, sourceLabel(song)].filter(Boolean).join(" · ") || sourceLabel(song);
     if (song.cover) {
-      cover.style.backgroundImage = `url("${song.cover}")`;
+      const thumb = optimizedImageUrl(song.cover, { size: IMAGE_SIZES.list });
+      cover.style.backgroundImage = `url("${thumb.replace(/"/g, "%22")}")`;
       cover.classList.remove("empty");
     } else {
       cover.style.backgroundImage = "";

@@ -29,8 +29,18 @@ function json(data, status = 200) {
  */
 const DAILY_VOTE_LIMIT = 5;
 const DAILY_IP_LIMIT = 15;
+/** 总参与人数每到该倍数触发前端彩蛋（如 1000 / 1100） */
+const MILESTONE_STEP = 100;
 const VOTER_COOKIE = "cup_voter_id";
+const ANALYTICS_COOKIE = "heipa_analytics_id";
+const ANALYTICS_EVENTS = new Set([
+  "share_open",
+  "share_image_ready",
+  "cup_start",
+  "about_open",
+]);
 let quotaSchemaReady = false;
+let analyticsSchemaReady = false;
 
 function clampStr(s, n) {
   return String(s || "").trim().slice(0, n);
@@ -228,45 +238,205 @@ async function consumeVoteQuotas(env, cookieKey, ipKey, day, nowIso) {
   };
 }
 
+async function ensureAnalyticsSchema(env) {
+  if (analyticsSchemaReady) return;
+  await env.DB.batch([
+    env.DB.prepare(
+      `CREATE TABLE IF NOT EXISTS analytics_events_daily (
+        event_date TEXT NOT NULL,
+        event_name TEXT NOT NULL,
+        event_count INTEGER NOT NULL DEFAULT 0,
+        unique_visitors INTEGER NOT NULL DEFAULT 0,
+        updated_at TEXT NOT NULL,
+        PRIMARY KEY (event_date, event_name)
+      )`
+    ),
+    env.DB.prepare(
+      `CREATE TABLE IF NOT EXISTS analytics_event_uniques (
+        event_date TEXT NOT NULL,
+        event_name TEXT NOT NULL,
+        visitor_key TEXT NOT NULL,
+        created_at TEXT NOT NULL,
+        PRIMARY KEY (event_date, event_name, visitor_key)
+      )`
+    ),
+    env.DB.prepare(
+      `CREATE INDEX IF NOT EXISTS idx_analytics_events_date
+       ON analytics_events_daily (event_date DESC, event_name)`
+    ),
+    env.DB.prepare(
+      `CREATE INDEX IF NOT EXISTS idx_analytics_uniques_date
+       ON analytics_event_uniques (event_date DESC)`
+    ),
+  ]);
+  analyticsSchemaReady = true;
+}
+
+async function resolveAnalyticsVisitor(request) {
+  const cookies = parseCookies(request.headers.get("cookie"));
+  const ownToken = clampStr(cookies[ANALYTICS_COOKIE], 100);
+  const voterToken = clampStr(cookies[VOTER_COOKIE], 100);
+  const token = ownToken || voterToken || crypto.randomUUID();
+  return {
+    visitorKey: await sha256Hex(`analytics:v1:${token}`),
+    setCookie: ownToken ? "" : cookieHeader(ANALYTICS_COOKIE, token),
+  };
+}
+
+async function handleMetrics(request, env, path, url) {
+  await ensureAnalyticsSchema(env);
+
+  if (request.method === "POST" && path === "/api/metrics/event") {
+    const origin = request.headers.get("Origin");
+    const fetchSite = request.headers.get("Sec-Fetch-Site");
+    if (origin !== url.origin || (fetchSite && fetchSite !== "same-origin")) {
+      return json({ ok: false, error: "same-origin request required" }, 403);
+    }
+
+    const body = await request.json().catch(() => ({}));
+    const eventName = clampStr(body.event, 40);
+    if (!ANALYTICS_EVENTS.has(eventName)) {
+      return json({ ok: false, error: "invalid event" }, 400);
+    }
+
+    const now = new Date();
+    const nowIso = now.toISOString();
+    const eventDate = dayKeyUTC8(now);
+    const { visitorKey, setCookie } = await resolveAnalyticsVisitor(request);
+
+    await env.DB.prepare(
+      `INSERT INTO analytics_events_daily
+         (event_date, event_name, event_count, unique_visitors, updated_at)
+       VALUES (?, ?, 1, 0, ?)
+       ON CONFLICT(event_date, event_name) DO UPDATE SET
+         event_count = analytics_events_daily.event_count + 1,
+         updated_at = excluded.updated_at`
+    )
+      .bind(eventDate, eventName, nowIso)
+      .run();
+
+    const uniqueInsert = await env.DB.prepare(
+      `INSERT OR IGNORE INTO analytics_event_uniques
+         (event_date, event_name, visitor_key, created_at)
+       VALUES (?, ?, ?, ?)`
+    )
+      .bind(eventDate, eventName, visitorKey, nowIso)
+      .run();
+
+    if ((uniqueInsert?.meta?.changes || 0) > 0) {
+      await env.DB.prepare(
+        `UPDATE analytics_events_daily
+         SET unique_visitors = unique_visitors + 1, updated_at = ?
+         WHERE event_date = ? AND event_name = ?`
+      )
+        .bind(nowIso, eventDate, eventName)
+        .run();
+    }
+
+    const headers = { ...cors, "Content-Type": "application/json; charset=utf-8" };
+    if (setCookie) headers["Set-Cookie"] = setCookie;
+    return new Response(JSON.stringify({ ok: true }), { status: 202, headers });
+  }
+
+  if (request.method === "GET" && path === "/api/metrics") {
+    const days = Math.min(90, Math.max(1, Number(url.searchParams.get("days") || 30)));
+    const since = dayKeyUTC8(new Date(Date.now() - (days - 1) * 86400000));
+    const rows = await env.DB.prepare(
+      `SELECT event_date AS eventDate,
+              event_name AS eventName,
+              event_count AS eventCount,
+              unique_visitors AS uniqueVisitors,
+              updated_at AS updatedAt
+       FROM analytics_events_daily
+       WHERE event_date >= ?
+       ORDER BY event_date DESC, event_name ASC`
+    )
+      .bind(since)
+      .all();
+    return json({ ok: true, days, since, items: rows.results || [] });
+  }
+
+  return json({ error: "not found" }, 404);
+}
+
 async function handleRank(request, env, path, url) {
   if (request.method === "GET" && path.endsWith("/api/rank/meta")) {
-    const songCount = await env.DB.prepare("SELECT COUNT(*) AS c FROM song_wins").first();
+    const songCount = await env.DB.prepare(
+      "SELECT COUNT(DISTINCT lower(trim(title))) AS c FROM song_wins"
+    ).first();
     const artistCount = await env.DB.prepare("SELECT COUNT(*) AS c FROM artist_wins").first();
     const latest = await env.DB.prepare("SELECT MAX(updated_at) AS t FROM song_wins").first();
+    const songWins = await env.DB.prepare(
+      "SELECT COALESCE(SUM(wins), 0) AS t FROM song_wins"
+    ).first();
     return json({
       updatedAt: latest?.t || null,
       songCount: songCount?.c || 0,
       artistCount: artistCount?.c || 0,
+      totalWins: Number(songWins?.t || 0),
     });
   }
 
   if (request.method === "GET" && path.endsWith("/api/rank/songs")) {
-    const limit = Math.min(200, Math.max(1, Number(url.searchParams.get("limit") || 150)));
+    const limit = Math.min(2000, Math.max(1, Number(url.searchParams.get("limit") || 200)));
     const q = clampStr(url.searchParams.get("q"), 80).toLowerCase();
-    let rows;
-    if (q) {
-      rows = await env.DB.prepare(
-        `SELECT song_id AS songId, title, artist, cover, artist_id AS artistId, wins, updated_at AS updatedAt
+    const rows = await env.DB.prepare(
+      `WITH cleaned AS (
+         SELECT
+           song_id,
+           title,
+           CASE
+             WHEN instr(lower(artist), ' vs ') > 0 THEN
+               COALESCE(
+                 (SELECT name FROM artist_wins aw WHERE aw.artist_id = song_wins.artist_id),
+                 ''
+               )
+             ELSE artist
+           END AS artist,
+           cover,
+           artist_id,
+           wins,
+           updated_at
          FROM song_wins
-         WHERE lower(title) LIKE ? OR lower(artist) LIKE ?
-         ORDER BY wins DESC, title ASC LIMIT ?`
-      )
-        .bind(`%${q}%`, `%${q}%`, limit)
-        .all();
-    } else {
-      rows = await env.DB.prepare(
-        `SELECT song_id AS songId, title, artist, cover, artist_id AS artistId, wins, updated_at AS updatedAt
-         FROM song_wins ORDER BY wins DESC, title ASC LIMIT ?`
-      )
-        .bind(limit)
-        .all();
-    }
+       ),
+       merged_songs AS (
+         SELECT
+           min(song_id) AS songId,
+           min(title) AS title,
+           replace(group_concat(DISTINCT NULLIF(trim(artist), '')), ',', ' / ') AS artist,
+           max(cover) AS cover,
+           min(NULLIF(artist_id, '')) AS artistId,
+           sum(wins) AS wins,
+           count(*) AS sourceCount,
+           max(updated_at) AS updatedAt
+         FROM cleaned
+         GROUP BY lower(trim(title))
+       )
+       SELECT songId, title, artist, cover, artistId, wins, sourceCount, updatedAt
+       FROM merged_songs
+       WHERE ? = '' OR lower(title) LIKE ? OR lower(artist) LIKE ?
+       ORDER BY wins DESC, title ASC
+       LIMIT ?`
+    )
+      .bind(q, `%${q}%`, `%${q}%`, limit)
+      .all();
     const latest = rows.results?.[0]?.updatedAt || null;
-    return json({ updatedAt: latest, items: rows.results || [] });
+    const [songWins, songCount] = await Promise.all([
+      env.DB.prepare("SELECT COALESCE(SUM(wins), 0) AS t FROM song_wins").first(),
+      env.DB.prepare(
+        "SELECT COUNT(DISTINCT lower(trim(title))) AS c FROM song_wins"
+      ).first(),
+    ]);
+    return json({
+      updatedAt: latest,
+      totalWins: Number(songWins?.t || 0),
+      songCount: Number(songCount?.c || 0),
+      items: rows.results || [],
+    });
   }
 
   if (request.method === "GET" && path.endsWith("/api/rank/artists")) {
-    const limit = Math.min(200, Math.max(1, Number(url.searchParams.get("limit") || 100)));
+    const limit = Math.min(2000, Math.max(1, Number(url.searchParams.get("limit") || 200)));
     const q = clampStr(url.searchParams.get("q"), 80).toLowerCase();
     let rows;
     if (q) {
@@ -285,7 +455,291 @@ async function handleRank(request, env, path, url) {
         .bind(limit)
         .all();
     }
-    return json({ updatedAt: rows.results?.[0]?.updatedAt || null, items: rows.results || [] });
+    const [songWins, songCount] = await Promise.all([
+      env.DB.prepare("SELECT COALESCE(SUM(wins), 0) AS t FROM song_wins").first(),
+      env.DB.prepare(
+        "SELECT COUNT(DISTINCT lower(trim(title))) AS c FROM song_wins"
+      ).first(),
+    ]);
+    return json({
+      updatedAt: rows.results?.[0]?.updatedAt || null,
+      totalWins: Number(songWins?.t || 0),
+      songCount: Number(songCount?.c || 0),
+      items: rows.results || [],
+    });
+  }
+
+  const labelMatchupsMatch = path.match(/^\/api\/rank\/labels\/([^/]+)\/matchups$/);
+  if (request.method === "GET" && labelMatchupsMatch) {
+    const labelId = decodeURIComponent(labelMatchupsMatch[1] || "").trim();
+    if (!labelId) return json({ error: "bad label id" }, 400);
+    const self = await env.DB.prepare(
+      `SELECT label_id AS labelId, name, avatar, wins, battles, updated_at AS updatedAt
+       FROM label_beef_stats WHERE label_id = ?`
+    )
+      .bind(labelId)
+      .first();
+    const [rows, champRows] = await Promise.all([
+      env.DB.prepare(
+        `SELECT
+           m.opponent_id AS opponentId,
+           COALESCE(NULLIF(s.name, ''), m.opponent_id) AS opponentName,
+           m.wins AS wins,
+           m.battles AS battles,
+           m.updated_at AS updatedAt
+         FROM label_beef_matchups m
+         LEFT JOIN label_beef_stats s ON s.label_id = m.opponent_id
+         WHERE m.label_id = ?
+         ORDER BY
+           CASE WHEN m.battles > 0 THEN (m.wins * 1.0 / m.battles) ELSE 0 END DESC,
+           m.battles DESC,
+           opponentName ASC`
+      )
+        .bind(labelId)
+        .all(),
+      env.DB.prepare(
+        `SELECT
+           opponent_id AS opponentId,
+           song_id AS songId,
+           title,
+           artist,
+           cover,
+           wins
+         FROM label_beef_champions
+         WHERE label_id = ?
+         ORDER BY wins DESC, title ASC`
+      )
+        .bind(labelId)
+        .all(),
+    ]);
+    /** @type {Map<string, Array<{songId:string,title:string,artist:string,cover:string,wins:number}>>} */
+    const champsByOpp = new Map();
+    for (const c of champRows.results || []) {
+      const oid = String(c.opponentId || "");
+      if (!oid) continue;
+      if (!champsByOpp.has(oid)) champsByOpp.set(oid, []);
+      champsByOpp.get(oid).push({
+        songId: String(c.songId || ""),
+        title: String(c.title || ""),
+        artist: String(c.artist || ""),
+        cover: String(c.cover || ""),
+        wins: Number(c.wins || 0),
+      });
+    }
+    const items = (rows.results || []).map((r) => {
+      const battles = Number(r.battles || 0);
+      const wins = Number(r.wins || 0);
+      const opponentId = String(r.opponentId || "");
+      return {
+        opponentId,
+        opponentName: r.opponentName,
+        wins,
+        battles,
+        winRate: battles > 0 ? wins / battles : 0,
+        updatedAt: r.updatedAt || null,
+        champions: champsByOpp.get(opponentId) || [],
+      };
+    });
+    return json({
+      labelId,
+      name: self?.name || labelId,
+      avatar: self?.avatar || "",
+      wins: Number(self?.wins || 0),
+      battles: Number(self?.battles || 0),
+      winRate:
+        Number(self?.battles || 0) > 0
+          ? Number(self.wins || 0) / Number(self.battles || 0)
+          : 0,
+      items,
+    });
+  }
+
+  if (request.method === "GET" && path.endsWith("/api/rank/labels")) {
+    const limit = Math.min(500, Math.max(1, Number(url.searchParams.get("limit") || 200)));
+    const q = clampStr(url.searchParams.get("q"), 80).toLowerCase();
+    let rows;
+    if (q) {
+      rows = await env.DB.prepare(
+        `SELECT label_id AS labelId, name, avatar, wins, battles, updated_at AS updatedAt
+         FROM label_beef_stats
+         WHERE lower(name) LIKE ? OR lower(label_id) LIKE ?
+         ORDER BY
+           CASE WHEN battles > 0 THEN (wins * 1.0 / battles) ELSE 0 END DESC,
+           battles DESC,
+           name ASC
+         LIMIT ?`
+      )
+        .bind(`%${q}%`, `%${q}%`, limit)
+        .all();
+    } else {
+      rows = await env.DB.prepare(
+        `SELECT label_id AS labelId, name, avatar, wins, battles, updated_at AS updatedAt
+         FROM label_beef_stats
+         ORDER BY
+           CASE WHEN battles > 0 THEN (wins * 1.0 / battles) ELSE 0 END DESC,
+           battles DESC,
+           name ASC
+         LIMIT ?`
+      )
+        .bind(limit)
+        .all();
+    }
+    const [songWins, songCount] = await Promise.all([
+      env.DB.prepare("SELECT COALESCE(SUM(wins), 0) AS t FROM song_wins").first(),
+      env.DB.prepare(
+        "SELECT COUNT(DISTINCT lower(trim(title))) AS c FROM song_wins"
+      ).first(),
+    ]);
+    const items = (rows.results || []).map((r) => {
+      const battles = Number(r.battles || 0);
+      const wins = Number(r.wins || 0);
+      return {
+        labelId: r.labelId,
+        name: r.name,
+        avatar: r.avatar || "",
+        wins,
+        battles,
+        winRate: battles > 0 ? wins / battles : 0,
+        updatedAt: r.updatedAt || null,
+      };
+    });
+    return json({
+      updatedAt: items[0]?.updatedAt || null,
+      totalWins: Number(songWins?.t || 0),
+      songCount: Number(songCount?.c || 0),
+      items,
+    });
+  }
+
+  if (request.method === "GET" && path.endsWith("/api/rank/hangla")) {
+    const limit = Math.min(500, Math.max(1, Number(url.searchParams.get("limit") || 100)));
+    const [hangRows, laleRows, songWins, songCount] = await Promise.all([
+      env.DB.prepare(
+        `SELECT artist_id AS artistId, name, avatar, hang_wins AS wins, updated_at AS updatedAt
+         FROM hangla_artist_stats
+         WHERE hang_wins > 0
+         ORDER BY hang_wins DESC, name ASC
+         LIMIT ?`
+      )
+        .bind(limit)
+        .all(),
+      env.DB.prepare(
+        `SELECT artist_id AS artistId, name, avatar, lale_wins AS wins, updated_at AS updatedAt
+         FROM hangla_artist_stats
+         WHERE lale_wins > 0
+         ORDER BY lale_wins DESC, name ASC
+         LIMIT ?`
+      )
+        .bind(limit)
+        .all(),
+      env.DB.prepare("SELECT COALESCE(SUM(wins), 0) AS t FROM song_wins").first(),
+      env.DB.prepare(
+        "SELECT COUNT(DISTINCT lower(trim(title))) AS c FROM song_wins"
+      ).first(),
+    ]);
+    const hang = hangRows.results || [];
+    const lale = laleRows.results || [];
+    const updatedAt =
+      hang[0]?.updatedAt || lale[0]?.updatedAt || null;
+    return json({
+      updatedAt,
+      totalWins: Number(songWins?.t || 0),
+      songCount: Number(songCount?.c || 0),
+      hang,
+      lale,
+    });
+  }
+
+  if (request.method === "POST" && path.endsWith("/api/rank/hangla")) {
+    const body = await request.json().catch(() => ({}));
+    const hangList = Array.isArray(body.hang) ? body.hang : [];
+    const laleList = Array.isArray(body.lale) ? body.lale : [];
+    const now = new Date().toISOString();
+
+    const normalizeEntries = (list, max) => {
+      const out = [];
+      const seen = new Set();
+      for (const raw of list.slice(0, max)) {
+        const artistId = clampStr(raw?.artistId || raw?.id, 64);
+        if (!artistId || seen.has(artistId)) continue;
+        seen.add(artistId);
+        out.push({
+          artistId,
+          name: clampStr(raw?.name, 80) || artistId,
+          avatar: clampStr(raw?.avatar, 500),
+        });
+      }
+      return out;
+    };
+
+    // 夯最多 2；拉完了本场最多 15
+    const hang = normalizeEntries(hangList, 2);
+    const lale = normalizeEntries(laleList, 15);
+    if (!hang.length && !lale.length) {
+      return json({ ok: false, error: "empty hangla result" }, 400);
+    }
+
+    const day = dayKeyUTC8(new Date());
+    const { cookieKey, ipKey, setCookie } = await resolveVoterIdentity(request);
+    const quota = await consumeVoteQuotas(env, cookieKey, ipKey, day, now);
+    if (!quota.counted) {
+      const headers = { ...cors, "Content-Type": "application/json; charset=utf-8" };
+      if (setCookie) headers["Set-Cookie"] = setCookie;
+      return new Response(
+        JSON.stringify({
+          ok: true,
+          counted: false,
+          reason: quota.reason || "daily_quota_exceeded",
+          dailyLimit: DAILY_VOTE_LIMIT,
+          ipDailyLimit: DAILY_IP_LIMIT,
+          usedToday: quota.used,
+          remainingToday: quota.remaining,
+        }),
+        { status: 200, headers }
+      );
+    }
+
+    for (const a of hang) {
+      await env.DB.prepare(
+        `INSERT INTO hangla_artist_stats (artist_id, name, avatar, hang_wins, lale_wins, updated_at)
+         VALUES (?, ?, ?, 1, 0, ?)
+         ON CONFLICT(artist_id) DO UPDATE SET
+           name = excluded.name,
+           avatar = CASE WHEN excluded.avatar != '' THEN excluded.avatar ELSE hangla_artist_stats.avatar END,
+           hang_wins = hangla_artist_stats.hang_wins + 1,
+           updated_at = excluded.updated_at`
+      )
+        .bind(a.artistId, a.name, a.avatar, now)
+        .run();
+    }
+    for (const a of lale) {
+      await env.DB.prepare(
+        `INSERT INTO hangla_artist_stats (artist_id, name, avatar, hang_wins, lale_wins, updated_at)
+         VALUES (?, ?, ?, 0, 1, ?)
+         ON CONFLICT(artist_id) DO UPDATE SET
+           name = excluded.name,
+           avatar = CASE WHEN excluded.avatar != '' THEN excluded.avatar ELSE hangla_artist_stats.avatar END,
+           lale_wins = hangla_artist_stats.lale_wins + 1,
+           updated_at = excluded.updated_at`
+      )
+        .bind(a.artistId, a.name, a.avatar, now)
+        .run();
+    }
+
+    const headers = { ...cors, "Content-Type": "application/json; charset=utf-8" };
+    if (setCookie) headers["Set-Cookie"] = setCookie;
+    return new Response(
+      JSON.stringify({
+        ok: true,
+        counted: true,
+        hangCount: hang.length,
+        laleCount: lale.length,
+        dailyLimit: DAILY_VOTE_LIMIT,
+        usedToday: quota.used,
+        remainingToday: quota.remaining,
+      }),
+      { status: 200, headers }
+    );
   }
 
   if (request.method === "POST" && path.endsWith("/api/rank/win")) {
@@ -293,9 +747,18 @@ async function handleRank(request, env, path, url) {
     const songId = clampStr(body.songId, 32);
     const artistId = clampStr(body.artistId, 32);
     const title = clampStr(body.title, 120);
-    const artist = clampStr(body.artistName || body.artist, 120);
+    const cupType = clampStr(body.cupType, 32);
+    const isLabelBeef = cupType === "label-beef";
+    // Label beef: store roster artist on song rank; solo cups keep host artistName.
+    const artist = isLabelBeef
+      ? clampStr(body.songArtist || body.artist, 120)
+      : clampStr(body.artistName || body.artist, 120);
     const cover = clampStr(body.cover, 500);
     const avatar = clampStr(body.avatar, 500);
+    const winnerLabelId = clampStr(body.winnerLabelId, 64);
+    const winnerLabelName = clampStr(body.winnerLabelName, 80) || winnerLabelId;
+    const loserLabelId = clampStr(body.loserLabelId, 64);
+    const loserLabelName = clampStr(body.loserLabelName, 80) || loserLabelId;
     const now = new Date().toISOString();
 
     if (!/^\d+$/.test(songId) || !title) {
@@ -355,9 +818,38 @@ async function handleRank(request, env, path, url) {
       artistWins = row?.wins ?? null;
     }
 
-    const song = await env.DB.prepare("SELECT wins FROM song_wins WHERE song_id = ?")
-      .bind(songId)
+    if (
+      isLabelBeef &&
+      winnerLabelId &&
+      loserLabelId &&
+      winnerLabelId !== loserLabelId
+    ) {
+      await bumpLabelBeefResult(env, {
+        winnerLabelId,
+        winnerLabelName,
+        loserLabelId,
+        loserLabelName,
+        avatar: avatar || cover,
+        now,
+        songId,
+        title,
+        artist,
+        cover,
+      });
+    }
+
+    const song = await env.DB.prepare(
+      "SELECT sum(wins) AS wins FROM song_wins WHERE lower(trim(title)) = lower(trim(?))"
+    )
+      .bind(title)
       .first();
+
+    const totalRow = await env.DB.prepare(
+      "SELECT COALESCE(SUM(wins), 0) AS t FROM song_wins"
+    ).first();
+    const participantNo = Number(totalRow?.t || 0);
+    const milestone =
+      participantNo >= MILESTONE_STEP && participantNo % MILESTONE_STEP === 0;
 
     const headers = { ...cors, "Content-Type": "application/json; charset=utf-8" };
     if (setCookie) headers["Set-Cookie"] = setCookie;
@@ -371,12 +863,101 @@ async function handleRank(request, env, path, url) {
         remainingToday: quota.remaining,
         songWins: song?.wins || 1,
         artistWins,
+        participantNo,
+        milestone,
+        milestoneStep: MILESTONE_STEP,
       }),
       { status: 200, headers }
     );
   }
 
   return json({ error: "not found" }, 404);
+}
+
+/** One finished label-beef cup: both +1 battle; winner +1 win; pairwise both ways. */
+async function bumpLabelBeefResult(
+  env,
+  {
+    winnerLabelId,
+    winnerLabelName,
+    loserLabelId,
+    loserLabelName,
+    avatar,
+    now,
+    songId,
+    title,
+    artist,
+    cover,
+  }
+) {
+  await env.DB.prepare(
+    `INSERT INTO label_beef_stats (label_id, name, avatar, wins, battles, updated_at)
+     VALUES (?, ?, ?, 1, 1, ?)
+     ON CONFLICT(label_id) DO UPDATE SET
+       name = excluded.name,
+       avatar = CASE WHEN excluded.avatar != '' THEN excluded.avatar ELSE label_beef_stats.avatar END,
+       wins = label_beef_stats.wins + 1,
+       battles = label_beef_stats.battles + 1,
+       updated_at = excluded.updated_at`
+  )
+    .bind(winnerLabelId, winnerLabelName || winnerLabelId, avatar || "", now)
+    .run();
+
+  await env.DB.prepare(
+    `INSERT INTO label_beef_stats (label_id, name, avatar, wins, battles, updated_at)
+     VALUES (?, ?, ?, 0, 1, ?)
+     ON CONFLICT(label_id) DO UPDATE SET
+       name = excluded.name,
+       battles = label_beef_stats.battles + 1,
+       updated_at = excluded.updated_at`
+  )
+    .bind(loserLabelId, loserLabelName || loserLabelId, "", now)
+    .run();
+
+  await env.DB.prepare(
+    `INSERT INTO label_beef_matchups (label_id, opponent_id, wins, battles, updated_at)
+     VALUES (?, ?, 1, 1, ?)
+     ON CONFLICT(label_id, opponent_id) DO UPDATE SET
+       wins = label_beef_matchups.wins + 1,
+       battles = label_beef_matchups.battles + 1,
+       updated_at = excluded.updated_at`
+  )
+    .bind(winnerLabelId, loserLabelId, now)
+    .run();
+
+  await env.DB.prepare(
+    `INSERT INTO label_beef_matchups (label_id, opponent_id, wins, battles, updated_at)
+     VALUES (?, ?, 0, 1, ?)
+     ON CONFLICT(label_id, opponent_id) DO UPDATE SET
+       battles = label_beef_matchups.battles + 1,
+       updated_at = excluded.updated_at`
+  )
+    .bind(loserLabelId, winnerLabelId, now)
+    .run();
+
+  if (songId && title) {
+    await env.DB.prepare(
+      `INSERT INTO label_beef_champions
+         (label_id, opponent_id, song_id, title, artist, cover, wins, updated_at)
+       VALUES (?, ?, ?, ?, ?, ?, 1, ?)
+       ON CONFLICT(label_id, opponent_id, song_id) DO UPDATE SET
+         title = excluded.title,
+         artist = CASE WHEN excluded.artist != '' THEN excluded.artist ELSE label_beef_champions.artist END,
+         cover = CASE WHEN excluded.cover != '' THEN excluded.cover ELSE label_beef_champions.cover END,
+         wins = label_beef_champions.wins + 1,
+         updated_at = excluded.updated_at`
+    )
+      .bind(
+        winnerLabelId,
+        loserLabelId,
+        songId,
+        title,
+        artist || "",
+        cover || "",
+        now
+      )
+      .run();
+  }
 }
 
 /** 冷门歌手热门包 TTL：24 小时 */
@@ -559,6 +1140,53 @@ function isAllowedCoverHost(hostname) {
   );
 }
 
+function isNeteaseCoverHost(hostname) {
+  const h = String(hostname || "").toLowerCase();
+  return h === "music.126.net" || h.endsWith(".music.126.net") || h.endsWith(".126.net");
+}
+
+const IMG_ALLOWED_SIZES = new Set([
+  48, 64, 96, 128, 160, 192, 200, 256, 320, 360, 400, 512, 640, 800,
+]);
+
+function normalizeCoverSize(raw) {
+  const n = Number(raw);
+  if (!Number.isFinite(n) || n <= 0) return 0;
+  const rounded = Math.round(n);
+  if (IMG_ALLOWED_SIZES.has(rounded)) return rounded;
+  let best = 0;
+  let bestDist = Infinity;
+  for (const s of IMG_ALLOWED_SIZES) {
+    const d = Math.abs(s - rounded);
+    if (d < bestDist) {
+      best = s;
+      bestDist = d;
+    }
+  }
+  return best;
+}
+
+/** Resize NetEase thumbs and normalize query so cache keys stay stable. */
+function parseNeteaseParamSize(target) {
+  const m = String(target.searchParams.get("param") || "").match(/^(\d+)y(\d+)$/i);
+  if (!m) return 0;
+  return normalizeCoverSize(m[1]);
+}
+
+function normalizeUpstreamCoverUrl(target, size) {
+  const host = target.hostname.toLowerCase();
+  if (isNeteaseCoverHost(host)) {
+    const dim = size || parseNeteaseParamSize(target) || 192;
+    return `${target.origin}${target.pathname}?param=${dim}y${dim}`;
+  }
+  if (host.includes("mzstatic.com") && size) {
+    return target
+      .toString()
+      .replace(/\/\d+x\d+bb\./, `/${size}x${size}bb.`);
+  }
+  return target.toString();
+}
+
 async function proxyCoverImage(url) {
   const raw = url.searchParams.get("u") || "";
   let target;
@@ -574,7 +1202,34 @@ async function proxyCoverImage(url) {
     return json({ error: "host not allowed" }, 403);
   }
 
-  const upstream = await fetch(target.toString(), {
+  const requested = normalizeCoverSize(url.searchParams.get("s") || url.searchParams.get("size") || 0);
+  const fromUrl = isNeteaseCoverHost(target.hostname) ? parseNeteaseParamSize(target) : 0;
+  const size = requested || fromUrl || 0;
+  const upstreamUrl = normalizeUpstreamCoverUrl(target, size);
+
+  // Stable Worker Cache API key (normalized upstream + size), independent of client `u=` encoding.
+  const cacheKey = new Request(
+    `https://img-cache.heipaclub.internal/v1?u=${encodeURIComponent(upstreamUrl)}&s=${size || 0}`,
+    { method: "GET" }
+  );
+  const cache = caches.default;
+  const cached = await cache.match(cacheKey);
+  if (cached) {
+    const headers = new Headers(cached.headers);
+    Object.entries(cors).forEach(([k, v]) => headers.set(k, v));
+    headers.set("Cache-Control", "public, max-age=604800, stale-while-revalidate=86400");
+    headers.set("X-Img-Cache", "HIT");
+    return new Response(cached.body, { status: cached.status, headers });
+  }
+
+  const upstream = await fetch(upstreamUrl, {
+    cf: {
+      // Cache third-party image bytes at the edge so NetEase CDN latency
+      // mostly hits cold/first visitors only.
+      cacheEverything: true,
+      cacheTtl: 60 * 60 * 24 * 7,
+      cacheTtlByStatus: { "200-299": 604800, "400-499": 60, "500-599": 0 },
+    },
     headers: {
       Referer: "https://music.163.com/",
       "User-Agent":
@@ -586,7 +1241,7 @@ async function proxyCoverImage(url) {
   if (!upstream.ok) {
     return new Response(null, {
       status: upstream.status,
-      headers: { ...cors, "Cache-Control": "no-store" },
+      headers: { ...cors, "Cache-Control": "no-store", "X-Img-Cache": "MISS" },
     });
   }
 
@@ -595,14 +1250,26 @@ async function proxyCoverImage(url) {
     return json({ error: "not an image" }, 415);
   }
 
-  return new Response(upstream.body, {
+  const outHeaders = {
+    "Content-Type": ctype.startsWith("image/") ? ctype : "image/jpeg",
+    // Browser + CDN: long-lived success, allow stale while revalidate.
+    "Cache-Control": "public, max-age=604800, stale-while-revalidate=86400",
+    "X-Img-Cache": "MISS",
+    ...cors,
+  };
+  const response = new Response(upstream.body, {
     status: 200,
-    headers: {
-      "Content-Type": ctype.startsWith("image/") ? ctype : "image/jpeg",
-      "Cache-Control": "public, max-age=86400, immutable",
-      ...cors,
-    },
+    headers: outHeaders,
   });
+
+  // Store Worker-exit response so repeat /api/img hits skip re-fetch work.
+  try {
+    await cache.put(cacheKey, response.clone());
+  } catch {
+    /* Cache API may reject opaque/unsupported bodies — still return the image. */
+  }
+
+  return response;
 }
 
 export default {
@@ -621,6 +1288,13 @@ export default {
 
       if (path === "/api/artist-top" || path.startsWith("/api/artist-top/")) {
         return await handleArtistTopCache(request, env, path, url);
+      }
+
+      if (path === "/api/metrics" || path.startsWith("/api/metrics/")) {
+        if (!env.DB) {
+          return json({ error: "D1 binding DB missing" }, 503);
+        }
+        return await handleMetrics(request, env, path, url);
       }
 
       if (path.startsWith("/api/rank")) {

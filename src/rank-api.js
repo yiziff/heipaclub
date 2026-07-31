@@ -23,11 +23,79 @@ export async function fetchArtistRank({ limit = 100, q = "" } = {}) {
   return getJson("/artists", { limit, q });
 }
 
+export async function fetchLabelBeefRank({ limit = 200, q = "" } = {}) {
+  return getJson("/labels", { limit, q });
+}
+
+export async function fetchLabelBeefMatchups(labelId) {
+  const id = encodeURIComponent(String(labelId || "").trim());
+  if (!id) throw new Error("rank /labels matchups: missing id");
+  return getJson(`/labels/${id}/matchups`);
+}
+
+export async function fetchHangLaRank({ limit = 100 } = {}) {
+  return getJson("/hangla", { limit });
+}
+
+/**
+ * Report one finished「从夯到拉」round (夯 + 拉完了 lists).
+ */
+export async function reportHangLaRound({ hang = [], lale = [] } = {}) {
+  const hangIds = hang.map((a) => String(a.artistId || a.id || "")).filter(Boolean).sort();
+  const laleIds = lale.map((a) => String(a.artistId || a.id || "")).filter(Boolean).sort();
+  if (!hangIds.length && !laleIds.length) {
+    return { ok: false, skipped: true, reason: "empty" };
+  }
+  const dedupeKey = `cn-rap-cup:reported-hangla:${hangIds.join(",")}|${laleIds.join(",")}`;
+  try {
+    if (sessionStorage.getItem(dedupeKey)) {
+      return { ok: true, skipped: true, reason: "already reported" };
+    }
+  } catch (_) {}
+
+  const payload = {
+    hang: hang.map((a) => ({
+      artistId: String(a.artistId || a.id || ""),
+      name: a.name || "",
+      avatar: a.avatar || "",
+    })),
+    lale: lale.map((a) => ({
+      artistId: String(a.artistId || a.id || ""),
+      name: a.name || "",
+      avatar: a.avatar || "",
+    })),
+  };
+
+  const res = await fetch(BASE + "/hangla", {
+    method: "POST",
+    credentials: "same-origin",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(payload),
+  });
+  const data = await res.json().catch(() => ({}));
+  if (!res.ok || !data.ok) {
+    return { ok: false, error: data.error || `HTTP ${res.status}` };
+  }
+  if (data.counted !== false) {
+    try {
+      sessionStorage.setItem(dedupeKey, "1");
+    } catch (_) {}
+  }
+  return data;
+}
+
 export async function fetchRankMeta() {
   try {
     return await getJson("/meta");
   } catch {
-    return { updatedAt: null, songCount: 0, artistCount: 0 };
+    return {
+      updatedAt: null,
+      songCount: 0,
+      artistCount: 0,
+      totalWins: 0,
+      totalSongWins: 0,
+      totalArtistWins: 0,
+    };
   }
 }
 
@@ -39,28 +107,68 @@ export async function reportChampionWin({
   artistId,
   artistName,
   artistAvatar,
+  cupType = "",
+  songArtist = "",
+  winnerLabelId = "",
+  winnerLabelName = "",
+  loserLabelId = "",
+  loserLabelName = "",
 } = {}) {
   const songId = String(song?.neteaseId || song?.id || "").trim();
   if (!/^\d+$/.test(songId)) {
-    return { ok: false, skipped: true, reason: "no song id" };
+    return { ok: false, skipped: true, reason: "no song id", milestone: false };
   }
 
-  const dedupeKey = `cn-rap-cup:reported-win:${artistId || ""}:${songId}`;
+  const isLabelBeef = cupType === "label-beef";
+  const dedupeKey = isLabelBeef
+    ? `cn-rap-cup:reported-win:beef:${winnerLabelId || ""}:${loserLabelId || ""}:${songId}`
+    : `cn-rap-cup:reported-win:${artistId || ""}:${songId}`;
+  const milestoneKey = `${dedupeKey}:milestone`;
+  const milestoneShownKey = `${dedupeKey}:milestone-shown`;
   try {
     if (sessionStorage.getItem(dedupeKey)) {
-      return { ok: true, skipped: true, reason: "already reported" };
+      const alreadyShown = sessionStorage.getItem(milestoneShownKey);
+      const savedNo = Number(sessionStorage.getItem(milestoneKey) || 0);
+      const cachedWins = Number(sessionStorage.getItem(`cn-rap-cup:song-wins:${songId}`) || 0) || null;
+      if (!alreadyShown && savedNo >= 100 && savedNo % 100 === 0) {
+        return {
+          ok: true,
+          skipped: true,
+          reason: "already reported",
+          participantNo: savedNo,
+          songWins: cachedWins,
+          milestone: true,
+        };
+      }
+      return {
+        ok: true,
+        skipped: true,
+        reason: "already reported",
+        songWins: cachedWins,
+        milestone: false,
+      };
     }
   } catch (_) {}
+
+  const displayArtist = isLabelBeef
+    ? songArtist || song?.rosterArtistName || song?.artist || ""
+    : artistName || song?.artist || "";
 
   const payload = {
     songId,
     artistId: artistId ? String(artistId) : "",
     title: song.title || "",
     // 用你选择开赛的那位歌手名（如「艾志恒Asen」），不用网易云合作艺人串
-    artist: artistName || song.artist || "",
-    artistName: artistName || song.artist || "",
+    artist: displayArtist,
+    artistName: isLabelBeef ? displayArtist : artistName || song?.artist || "",
+    songArtist: displayArtist,
     cover: song.cover || song.coverSm || "",
     avatar: artistAvatar || "",
+    cupType: cupType || "",
+    winnerLabelId: winnerLabelId || "",
+    winnerLabelName: winnerLabelName || "",
+    loserLabelId: loserLabelId || "",
+    loserLabelName: loserLabelName || "",
   };
 
   const res = await fetch(BASE + "/win", {
@@ -71,7 +179,7 @@ export async function reportChampionWin({
   });
   const data = await res.json().catch(() => ({}));
   if (!res.ok || !data.ok) {
-    return { ok: false, error: data.error || `HTTP ${res.status}` };
+    return { ok: false, error: data.error || `HTTP ${res.status}`, milestone: false };
   }
 
   if (data.counted === false) {
@@ -82,6 +190,8 @@ export async function reportChampionWin({
       dailyLimit: data.dailyLimit ?? 5,
       usedToday: data.usedToday ?? null,
       remainingToday: data.remainingToday ?? 0,
+      participantNo: null,
+      milestone: false,
     };
   }
 
@@ -89,5 +199,35 @@ export async function reportChampionWin({
     sessionStorage.setItem(dedupeKey, "1");
   } catch (_) {}
 
-  return data;
+  const songWins = Number(data.songWins || 0) || null;
+  if (songWins != null) {
+    try {
+      sessionStorage.setItem(`cn-rap-cup:song-wins:${songId}`, String(songWins));
+    } catch (_) {}
+  }
+
+  const participantNo = Number(data.participantNo || 0) || null;
+  const milestone = Boolean(data.milestone) && participantNo != null;
+  if (milestone) {
+    try {
+      sessionStorage.setItem(milestoneKey, String(participantNo));
+    } catch (_) {}
+  }
+
+  return {
+    ...data,
+    songWins,
+    participantNo,
+    milestone,
+  };
+}
+
+/** 彩蛋已展示后调用，避免同一次上报反复弹出 */
+export function markMilestoneShown({ song, artistId } = {}) {
+  const songId = String(song?.neteaseId || song?.id || "").trim();
+  if (!songId) return;
+  const key = `cn-rap-cup:reported-win:${artistId || ""}:${songId}:milestone-shown`;
+  try {
+    sessionStorage.setItem(key, "1");
+  } catch (_) {}
 }

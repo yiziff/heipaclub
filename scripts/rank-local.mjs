@@ -163,10 +163,12 @@ const server = http.createServer(async (req, res) => {
   try {
     if (req.method === "GET" && url.pathname === "/api/rank/meta") {
       const db = load();
+      const totalWins = Object.values(db.songs).reduce((s, x) => s + Number(x.wins || 0), 0);
       return json(res, 200, {
         updatedAt: db.updatedAt,
         songCount: Object.keys(db.songs).length,
         artistCount: Object.keys(db.artists).length,
+        totalWins,
       });
     }
 
@@ -174,8 +176,12 @@ const server = http.createServer(async (req, res) => {
       const db = load();
       const limit = Number(url.searchParams.get("limit") || 150);
       const q = url.searchParams.get("q") || "";
+      const songs = Object.values(db.songs);
+      const totalWins = songs.reduce((s, x) => s + Number(x.wins || 0), 0);
       return json(res, 200, {
         updatedAt: db.updatedAt,
+        totalWins,
+        songCount: songs.length,
         items: listSongs(db, { limit, q }),
       });
     }
@@ -184,8 +190,12 @@ const server = http.createServer(async (req, res) => {
       const db = load();
       const limit = Number(url.searchParams.get("limit") || 100);
       const q = url.searchParams.get("q") || "";
+      const songs = Object.values(db.songs);
+      const totalWins = songs.reduce((s, x) => s + Number(x.wins || 0), 0);
       return json(res, 200, {
         updatedAt: db.updatedAt,
+        totalWins,
+        songCount: songs.length,
         items: listArtists(db, { limit, q }),
       });
     }

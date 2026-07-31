@@ -9,12 +9,7 @@
   "assets": {
     "not_found_handling": "single-page-application",
     "run_worker_first": [
-      "/api/rank/*",
-      "/api/netease/*",
-      "/api/artist-top",
-      "/api/artist-top/*",
-      "/api/img",
-      "/api/img/*"
+      "/api/*"
     ]
   },
   "d1_databases": [

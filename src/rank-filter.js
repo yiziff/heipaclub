@@ -123,3 +123,40 @@ export function filterLabelRank(rows, q = "") {
       norm(r.labelId).includes(needle)
   );
 }
+
+/**
+ * Merge label-beef API stats with static HIPHOP_LABELS (city / members / avatar).
+ * Labels with no battles still appear as「暂无对战」.
+ * @param {Array<{labelId,name,avatar,wins,battles,winRate}>} apiItems
+ */
+export function mergeLabelBeefRank(apiItems = []) {
+  const byId = new Map(
+    (apiItems || []).map((r) => [String(r.labelId || "").trim(), r])
+  );
+  const rows = HIPHOP_LABELS.map((label) => {
+    const members = artistsInLabel(ARTISTS, label.id);
+    const top = members
+      .slice()
+      .sort((a, b) => Number(b.fans || 0) - Number(a.fans || 0))[0];
+    const stat = byId.get(label.id);
+    const wins = Number(stat?.wins || 0);
+    const battles = Number(stat?.battles || 0);
+    return {
+      labelId: label.id,
+      name: label.name,
+      city: label.city || "",
+      members: members.length,
+      wins,
+      battles,
+      winRate: battles > 0 ? wins / battles : 0,
+      avatar: stat?.avatar || top?.avatar || "",
+    };
+  }).sort(
+    (a, b) =>
+      b.winRate - a.winRate ||
+      b.battles - a.battles ||
+      b.wins - a.wins ||
+      a.name.localeCompare(b.name, "zh")
+  );
+  return rows;
+}
