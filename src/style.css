@@ -1109,6 +1109,40 @@ a.ghost-btn {
   filter: brightness(1.06);
 }
 
+.shell:has(.hero) .topbar-actions .artist-pk-top-btn {
+  position: relative;
+  border: none;
+  background: var(--accent, #b8ff1a);
+  color: #111110;
+  font-weight: 800;
+  letter-spacing: 0.04em;
+  padding: 0.5rem 1.05rem;
+  white-space: nowrap;
+  box-shadow:
+    0 0 0 3px rgba(184, 255, 26, 0.28),
+    0 6px 16px rgba(184, 255, 26, 0.35);
+  animation: artist-pk-btn-pulse 2s ease-in-out infinite;
+}
+
+.shell:has(.hero) .topbar-actions .artist-pk-top-btn:hover {
+  filter: brightness(1.04);
+  transform: translateY(-1px);
+}
+
+@keyframes artist-pk-btn-pulse {
+  0%,
+  100% {
+    box-shadow:
+      0 0 0 3px rgba(184, 255, 26, 0.24),
+      0 6px 16px rgba(184, 255, 26, 0.3);
+  }
+  50% {
+    box-shadow:
+      0 0 0 5px rgba(184, 255, 26, 0.12),
+      0 8px 18px rgba(184, 255, 26, 0.42);
+  }
+}
+
 @keyframes beef-btn-pulse {
   0%,
   100% {
@@ -1139,7 +1173,8 @@ a.ghost-btn {
 
 @media (prefers-reduced-motion: reduce) {
   .shell:has(.hero) .topbar-actions .hangla-top-btn,
-  .shell:has(.hero) .topbar-actions .beef-top-btn {
+  .shell:has(.hero) .topbar-actions .beef-top-btn,
+  .shell:has(.hero) .topbar-actions .artist-pk-top-btn {
     animation: none;
   }
   .bracket-ready-hint {
@@ -1150,7 +1185,8 @@ a.ghost-btn {
 
 @media (max-width: 640px) {
   .shell:has(.hero) .topbar-actions .hangla-top-btn,
-  .shell:has(.hero) .topbar-actions .guide-top-btn {
+  .shell:has(.hero) .topbar-actions .guide-top-btn,
+  .shell:has(.hero) .topbar-actions .artist-pk-top-btn {
     padding: 0.45rem 0.75rem;
     font-size: 0.82rem;
   }
@@ -1194,6 +1230,22 @@ a.ghost-btn {
   margin: 0;
 }
 
+.rank-head-title-row {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 0.75rem 1rem;
+}
+
+.rank-grand-total {
+  min-width: 6.4rem;
+  padding: 0.5rem 1rem;
+}
+
+.rank-grand-total strong {
+  font-size: 1.05rem;
+}
+
 .rank-sub {
   margin: 0.35rem 0 0;
   color: var(--muted);
@@ -1204,6 +1256,12 @@ a.ghost-btn {
   gap: 0.5rem;
   margin: 1.25rem 0 0.85rem;
   flex-wrap: wrap;
+}
+
+.rank-tabs .rank-tab-artist-pk:not(.active) {
+  background: color-mix(in srgb, var(--accent, #b8ff1a) 28%, #fff);
+  border-color: color-mix(in srgb, var(--accent, #b8ff1a) 55%, var(--line));
+  font-weight: 700;
 }
 
 .rank-region-row {
@@ -4947,6 +5005,126 @@ body:has(.champ-cup) {
 
 .hangla-setup-meta strong {
   color: var(--ink);
+}
+
+.artist-pk-rank {
+  margin-top: 0.35rem;
+  padding: 1rem 1.05rem 1.1rem;
+  border-radius: 18px;
+  background: color-mix(in srgb, var(--panel, #fff) 88%, #b8ff1a 12%);
+  border: 1px solid color-mix(in srgb, #111 8%, transparent);
+}
+
+.artist-pk-rank-head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 0.75rem;
+  margin-bottom: 0.85rem;
+}
+
+.artist-pk-rank-head h2 {
+  margin: 0;
+  font-family: var(--display);
+  font-size: 1.25rem;
+  letter-spacing: 0.03em;
+}
+
+.artist-pk-rank-head p {
+  margin: 0.25rem 0 0;
+  color: var(--muted, #6b7280);
+  font-size: 0.86rem;
+}
+
+.artist-pk-rank-more {
+  flex-shrink: 0;
+  white-space: nowrap;
+}
+
+.artist-pk-rank-board {
+  min-height: 3rem;
+}
+
+.artist-pk-rank-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 0.45rem;
+}
+
+.artist-pk-rank-row {
+  display: grid;
+  grid-template-columns: 1.6rem 40px minmax(0, 1fr);
+  align-items: center;
+  gap: 0.65rem;
+  padding: 0.45rem 0.55rem;
+  border-radius: 12px;
+  background: color-mix(in srgb, #fff 82%, transparent);
+}
+
+.artist-pk-rank-num {
+  font-family: var(--display);
+  font-size: 0.95rem;
+  text-align: center;
+  color: var(--muted, #6b7280);
+}
+
+.artist-pk-rank-num.top1 {
+  color: #c9a227;
+}
+
+.artist-pk-rank-num.top2 {
+  color: #7a8594;
+}
+
+.artist-pk-rank-num.top3 {
+  color: #b87333;
+}
+
+.artist-pk-rank-avatar {
+  width: 40px;
+  height: 40px;
+  border-radius: 999px;
+  object-fit: cover;
+  background: #ddd;
+}
+
+.artist-pk-rank-meta {
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 0.1rem;
+}
+
+.artist-pk-rank-meta strong {
+  font-size: 0.95rem;
+  line-height: 1.2;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.artist-pk-rank-meta span {
+  font-size: 0.8rem;
+  color: var(--muted, #6b7280);
+}
+
+.artist-pk-rank-empty {
+  margin: 0;
+  color: var(--muted, #6b7280);
+  font-size: 0.9rem;
+}
+
+@media (max-width: 640px) {
+  .artist-pk-rank {
+    padding: 0.9rem;
+  }
+
+  .artist-pk-rank-head {
+    flex-wrap: wrap;
+  }
 }
 
 .hangla-section-label {

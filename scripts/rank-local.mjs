@@ -21,12 +21,14 @@ const rate = new Map(); // ip -> { count, reset }
 
 function load() {
   if (!fs.existsSync(STORE)) {
-    return { songs: {}, artists: {}, updatedAt: null };
+    return { songs: {}, artists: {}, artistsPk: {}, updatedAt: null };
   }
   try {
-    return JSON.parse(fs.readFileSync(STORE, "utf8"));
+    const data = JSON.parse(fs.readFileSync(STORE, "utf8"));
+    if (!data.artistsPk) data.artistsPk = {};
+    return data;
   } catch {
-    return { songs: {}, artists: {}, updatedAt: null };
+    return { songs: {}, artists: {}, artistsPk: {}, updatedAt: null };
   }
 }
 
@@ -103,20 +105,52 @@ function listArtists(db, { limit = 100, q = "" } = {}) {
     .slice(0, Math.min(200, Math.max(1, limit)));
 }
 
+function listArtistsPk(db, { limit = 100, q = "" } = {}) {
+  const needle = q.trim().toLowerCase();
+  let rows = Object.values(db.artistsPk || {});
+  if (needle) {
+    rows = rows.filter((r) => r.name.toLowerCase().includes(needle));
+  }
+  return rows
+    .sort((a, b) => b.wins - a.wins || a.name.localeCompare(b.name, "zh"))
+    .slice(0, Math.min(200, Math.max(1, limit)));
+}
+
 function applyWin(db, body, city = "") {
   const songId = clampStr(body.songId, 32);
   const artistId = clampStr(body.artistId, 32);
   const title = clampStr(body.title, 120);
+  const cupType = clampStr(body.cupType, 32);
+  const isArtistCup = cupType === "artist-cup";
   // Prefer cup host artist name over NetEase collab credit string
   const artist = clampStr(body.artistName || body.artist, 120);
   const cover = clampStr(body.cover, 500);
   const avatar = clampStr(body.avatar, 500);
+  const now = new Date().toISOString();
+
+  if (isArtistCup) {
+    if (!/^\d+$/.test(artistId) || !title) {
+      return { ok: false, error: "invalid artist" };
+    }
+    if (!db.artistsPk) db.artistsPk = {};
+    const row = db.artistsPk[artistId] || {
+      artistId,
+      name: artist || title || "未知歌手",
+      avatar: avatar || cover,
+      wins: 0,
+    };
+    row.name = artist || title || row.name;
+    if (avatar || cover) row.avatar = avatar || cover;
+    row.wins += 1;
+    row.updatedAt = now;
+    db.artistsPk[artistId] = row;
+    db.updatedAt = now;
+    return { ok: true, counted: true, songWins: row.wins, artistWins: row.wins };
+  }
 
   if (!/^\d+$/.test(songId) || !title) {
     return { ok: false, error: "invalid song" };
   }
-
-  const now = new Date().toISOString();
   const song = db.songs[songId] || {
     songId,
     title,
@@ -196,7 +230,23 @@ const server = http.createServer(async (req, res) => {
         updatedAt: db.updatedAt,
         totalWins,
         songCount: songs.length,
+        artistCount: Object.keys(db.artists || {}).length,
         items: listArtists(db, { limit, q }),
+      });
+    }
+
+    if (req.method === "GET" && url.pathname === "/api/rank/artists-pk") {
+      const db = load();
+      const limit = Number(url.searchParams.get("limit") || 100);
+      const q = url.searchParams.get("q") || "";
+      const songs = Object.values(db.songs);
+      const totalWins = songs.reduce((s, x) => s + Number(x.wins || 0), 0);
+      return json(res, 200, {
+        updatedAt: db.updatedAt,
+        totalWins,
+        songCount: songs.length,
+        artistCount: Object.keys(db.artistsPk || {}).length,
+        items: listArtistsPk(db, { limit, q }),
       });
     }
 

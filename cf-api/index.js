@@ -41,6 +41,7 @@ const ANALYTICS_EVENTS = new Set([
 ]);
 let quotaSchemaReady = false;
 let analyticsSchemaReady = false;
+let participationSchemaReady = false;
 
 function clampStr(s, n) {
   return String(s || "").trim().slice(0, n);
@@ -359,21 +360,100 @@ async function handleMetrics(request, env, path, url) {
   return json({ error: "not found" }, 404);
 }
 
+async function ensureParticipationSchema(env) {
+  if (participationSchemaReady) return;
+  await env.DB.prepare(
+    `CREATE TABLE IF NOT EXISTS participation_stats (
+      mode TEXT PRIMARY KEY,
+      plays INTEGER NOT NULL DEFAULT 0,
+      updated_at TEXT NOT NULL
+    )`
+  ).run();
+  participationSchemaReady = true;
+}
+
+/** 夯拉历史局数：无独立计数时用「获夯」总和回填（每局至少 1 次夯） */
+async function ensureHanglaPlaysSeeded(env) {
+  await ensureParticipationSchema(env);
+  const row = await env.DB.prepare(
+    "SELECT plays FROM participation_stats WHERE mode = 'hangla'"
+  ).first();
+  if (row) return Number(row.plays || 0);
+  const est = await env.DB.prepare(
+    "SELECT COALESCE(SUM(hang_wins), 0) AS t FROM hangla_artist_stats"
+  )
+    .first()
+    .catch(() => ({ t: 0 }));
+  const plays = Number(est?.t || 0);
+  const now = new Date().toISOString();
+  await env.DB.prepare(
+    `INSERT OR IGNORE INTO participation_stats (mode, plays, updated_at)
+     VALUES ('hangla', ?, ?)`
+  )
+    .bind(plays, now)
+    .run();
+  const again = await env.DB.prepare(
+    "SELECT plays FROM participation_stats WHERE mode = 'hangla'"
+  ).first();
+  return Number(again?.plays || plays);
+}
+
+async function bumpHanglaParticipation(env, nowIso) {
+  await ensureParticipationSchema(env);
+  await ensureHanglaPlaysSeeded(env);
+  await env.DB.prepare(
+    `UPDATE participation_stats
+     SET plays = plays + 1, updated_at = ?
+     WHERE mode = 'hangla'`
+  )
+    .bind(nowIso)
+    .run();
+}
+
+/**
+ * 四种玩法参与局数：
+ * - songPk: 歌手内部歌曲 PK（song_wins 去掉厂牌混战写入）
+ * - artistPk: 歌手大比拼
+ * - label: 厂牌对战（battles / 2）
+ * - hangla: 从夯到拉
+ * - total: 以上之和
+ */
+async function getParticipationStats(env) {
+  const [songSum, artistPkSum, labelBattles, hanglaPlays] = await Promise.all([
+    env.DB.prepare("SELECT COALESCE(SUM(wins), 0) AS t FROM song_wins").first(),
+    env.DB.prepare("SELECT COALESCE(SUM(wins), 0) AS t FROM artist_pk_wins")
+      .first()
+      .catch(() => ({ t: 0 })),
+    env.DB.prepare("SELECT COALESCE(SUM(battles), 0) AS t FROM label_beef_stats")
+      .first()
+      .catch(() => ({ t: 0 })),
+    ensureHanglaPlaysSeeded(env).catch(() => 0),
+  ]);
+  const label = Math.floor(Number(labelBattles?.t || 0) / 2);
+  const songAll = Number(songSum?.t || 0);
+  const songPk = Math.max(0, songAll - label);
+  const artistPk = Number(artistPkSum?.t || 0);
+  const hangla = Number(hanglaPlays || 0);
+  const total = songPk + artistPk + label + hangla;
+  return { total, songPk, artistPk, label, hangla, songAll };
+}
+
 async function handleRank(request, env, path, url) {
   if (request.method === "GET" && path.endsWith("/api/rank/meta")) {
     const songCount = await env.DB.prepare(
       "SELECT COUNT(DISTINCT lower(trim(title))) AS c FROM song_wins"
     ).first();
     const artistCount = await env.DB.prepare("SELECT COUNT(*) AS c FROM artist_wins").first();
+    const artistPkCount = await env.DB.prepare("SELECT COUNT(*) AS c FROM artist_pk_wins").first().catch(() => ({ c: 0 }));
     const latest = await env.DB.prepare("SELECT MAX(updated_at) AS t FROM song_wins").first();
-    const songWins = await env.DB.prepare(
-      "SELECT COALESCE(SUM(wins), 0) AS t FROM song_wins"
-    ).first();
+    const participation = await getParticipationStats(env);
     return json({
       updatedAt: latest?.t || null,
       songCount: songCount?.c || 0,
       artistCount: artistCount?.c || 0,
-      totalWins: Number(songWins?.t || 0),
+      artistPkCount: artistPkCount?.c || 0,
+      totalWins: participation.songAll,
+      participation,
     });
   }
 
@@ -421,16 +501,17 @@ async function handleRank(request, env, path, url) {
       .bind(q, `%${q}%`, `%${q}%`, limit)
       .all();
     const latest = rows.results?.[0]?.updatedAt || null;
-    const [songWins, songCount] = await Promise.all([
-      env.DB.prepare("SELECT COALESCE(SUM(wins), 0) AS t FROM song_wins").first(),
+    const [songCount, participation] = await Promise.all([
       env.DB.prepare(
         "SELECT COUNT(DISTINCT lower(trim(title))) AS c FROM song_wins"
       ).first(),
+      getParticipationStats(env),
     ]);
     return json({
       updatedAt: latest,
-      totalWins: Number(songWins?.t || 0),
+      totalWins: participation.songAll,
       songCount: Number(songCount?.c || 0),
+      participation,
       items: rows.results || [],
     });
   }
@@ -455,16 +536,56 @@ async function handleRank(request, env, path, url) {
         .bind(limit)
         .all();
     }
-    const [songWins, songCount] = await Promise.all([
-      env.DB.prepare("SELECT COALESCE(SUM(wins), 0) AS t FROM song_wins").first(),
+    const [songCount, artistCount, participation] = await Promise.all([
       env.DB.prepare(
         "SELECT COUNT(DISTINCT lower(trim(title))) AS c FROM song_wins"
       ).first(),
+      env.DB.prepare("SELECT COUNT(*) AS c FROM artist_wins").first(),
+      getParticipationStats(env),
     ]);
     return json({
       updatedAt: rows.results?.[0]?.updatedAt || null,
-      totalWins: Number(songWins?.t || 0),
+      totalWins: participation.songAll,
       songCount: Number(songCount?.c || 0),
+      artistCount: Number(artistCount?.c || 0),
+      participation,
+      items: rows.results || [],
+    });
+  }
+
+  if (request.method === "GET" && path.endsWith("/api/rank/artists-pk")) {
+    const limit = Math.min(2000, Math.max(1, Number(url.searchParams.get("limit") || 200)));
+    const q = clampStr(url.searchParams.get("q"), 80).toLowerCase();
+    let rows;
+    if (q) {
+      rows = await env.DB.prepare(
+        `SELECT artist_id AS artistId, name, avatar, wins, updated_at AS updatedAt
+         FROM artist_pk_wins WHERE lower(name) LIKE ?
+         ORDER BY wins DESC, name ASC LIMIT ?`
+      )
+        .bind(`%${q}%`, limit)
+        .all();
+    } else {
+      rows = await env.DB.prepare(
+        `SELECT artist_id AS artistId, name, avatar, wins, updated_at AS updatedAt
+         FROM artist_pk_wins ORDER BY wins DESC, name ASC LIMIT ?`
+      )
+        .bind(limit)
+        .all();
+    }
+    const [songCount, artistPkCount, participation] = await Promise.all([
+      env.DB.prepare(
+        "SELECT COUNT(DISTINCT lower(trim(title))) AS c FROM song_wins"
+      ).first(),
+      env.DB.prepare("SELECT COUNT(*) AS c FROM artist_pk_wins").first(),
+      getParticipationStats(env),
+    ]);
+    return json({
+      updatedAt: rows.results?.[0]?.updatedAt || null,
+      totalWins: participation.songAll,
+      songCount: Number(songCount?.c || 0),
+      artistCount: Number(artistPkCount?.c || 0),
+      participation,
       items: rows.results || [],
     });
   }
@@ -584,11 +705,11 @@ async function handleRank(request, env, path, url) {
         .bind(limit)
         .all();
     }
-    const [songWins, songCount] = await Promise.all([
-      env.DB.prepare("SELECT COALESCE(SUM(wins), 0) AS t FROM song_wins").first(),
+    const [songCount, participation] = await Promise.all([
       env.DB.prepare(
         "SELECT COUNT(DISTINCT lower(trim(title))) AS c FROM song_wins"
       ).first(),
+      getParticipationStats(env),
     ]);
     const items = (rows.results || []).map((r) => {
       const battles = Number(r.battles || 0);
@@ -605,15 +726,16 @@ async function handleRank(request, env, path, url) {
     });
     return json({
       updatedAt: items[0]?.updatedAt || null,
-      totalWins: Number(songWins?.t || 0),
+      totalWins: participation.songAll,
       songCount: Number(songCount?.c || 0),
+      participation,
       items,
     });
   }
 
   if (request.method === "GET" && path.endsWith("/api/rank/hangla")) {
     const limit = Math.min(500, Math.max(1, Number(url.searchParams.get("limit") || 100)));
-    const [hangRows, laleRows, songWins, songCount] = await Promise.all([
+    const [hangRows, laleRows, songCount, participation] = await Promise.all([
       env.DB.prepare(
         `SELECT artist_id AS artistId, name, avatar, hang_wins AS wins, updated_at AS updatedAt
          FROM hangla_artist_stats
@@ -632,10 +754,10 @@ async function handleRank(request, env, path, url) {
       )
         .bind(limit)
         .all(),
-      env.DB.prepare("SELECT COALESCE(SUM(wins), 0) AS t FROM song_wins").first(),
       env.DB.prepare(
         "SELECT COUNT(DISTINCT lower(trim(title))) AS c FROM song_wins"
       ).first(),
+      getParticipationStats(env),
     ]);
     const hang = hangRows.results || [];
     const lale = laleRows.results || [];
@@ -643,8 +765,9 @@ async function handleRank(request, env, path, url) {
       hang[0]?.updatedAt || lale[0]?.updatedAt || null;
     return json({
       updatedAt,
-      totalWins: Number(songWins?.t || 0),
+      totalWins: participation.songAll,
       songCount: Number(songCount?.c || 0),
+      participation,
       hang,
       lale,
     });
@@ -699,6 +822,8 @@ async function handleRank(request, env, path, url) {
       );
     }
 
+    await bumpHanglaParticipation(env, now).catch(() => {});
+
     for (const a of hang) {
       await env.DB.prepare(
         `INSERT INTO hangla_artist_stats (artist_id, name, avatar, hang_wins, lale_wins, updated_at)
@@ -749,6 +874,7 @@ async function handleRank(request, env, path, url) {
     const title = clampStr(body.title, 120);
     const cupType = clampStr(body.cupType, 32);
     const isLabelBeef = cupType === "label-beef";
+    const isArtistCup = cupType === "artist-cup";
     // Label beef: store roster artist on song rank; solo cups keep host artistName.
     const artist = isLabelBeef
       ? clampStr(body.songArtist || body.artist, 120)
@@ -761,7 +887,12 @@ async function handleRank(request, env, path, url) {
     const loserLabelName = clampStr(body.loserLabelName, 80) || loserLabelId;
     const now = new Date().toISOString();
 
-    if (!/^\d+$/.test(songId) || !title) {
+    // 歌手大比拼：只计 artist_pk_wins；单曲夺冠归属仍写 artist_wins
+    if (isArtistCup) {
+      if (!/^\d+$/.test(artistId) || !title) {
+        return json({ ok: false, error: "invalid artist" }, 400);
+      }
+    } else if (!/^\d+$/.test(songId) || !title) {
       return json({ ok: false, error: "invalid song" }, 400);
     }
 
@@ -785,6 +916,51 @@ async function handleRank(request, env, path, url) {
       );
     }
 
+    let artistWins = null;
+
+    if (isArtistCup) {
+      await env.DB.prepare(
+        `INSERT INTO artist_pk_wins (artist_id, name, avatar, wins, updated_at)
+         VALUES (?, ?, ?, 1, ?)
+         ON CONFLICT(artist_id) DO UPDATE SET
+           name = excluded.name,
+           avatar = CASE WHEN excluded.avatar != '' THEN excluded.avatar ELSE artist_pk_wins.avatar END,
+           wins = artist_pk_wins.wins + 1,
+           updated_at = excluded.updated_at`
+      )
+        .bind(artistId, artist || title || "未知歌手", avatar || cover, now)
+        .run();
+      const row = await env.DB.prepare("SELECT wins FROM artist_pk_wins WHERE artist_id = ?")
+        .bind(artistId)
+        .first();
+      artistWins = row?.wins ?? null;
+
+      const totalRow = await env.DB.prepare(
+        "SELECT COALESCE(SUM(wins), 0) AS t FROM song_wins"
+      ).first();
+      const participantNo = Number(totalRow?.t || 0);
+      const milestone =
+        participantNo >= MILESTONE_STEP && participantNo % MILESTONE_STEP === 0;
+      const headers = { ...cors, "Content-Type": "application/json; charset=utf-8" };
+      if (setCookie) headers["Set-Cookie"] = setCookie;
+      return new Response(
+        JSON.stringify({
+          ok: true,
+          counted: true,
+          dailyLimit: DAILY_VOTE_LIMIT,
+          ipDailyLimit: DAILY_IP_LIMIT,
+          usedToday: quota.used,
+          remainingToday: quota.remaining,
+          songWins: artistWins,
+          artistWins,
+          participantNo,
+          milestone,
+          milestoneStep: MILESTONE_STEP,
+        }),
+        { status: 200, headers }
+      );
+    }
+
     await env.DB.prepare(
       `INSERT INTO song_wins (song_id, title, artist, cover, artist_id, wins, updated_at)
        VALUES (?, ?, ?, ?, ?, 1, ?)
@@ -799,7 +975,6 @@ async function handleRank(request, env, path, url) {
       .bind(songId, title, artist, cover, artistId || "", now)
       .run();
 
-    let artistWins = null;
     if (artistId && /^\d+$/.test(artistId)) {
       await env.DB.prepare(
         `INSERT INTO artist_wins (artist_id, name, avatar, wins, updated_at)

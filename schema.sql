@@ -17,6 +17,15 @@ CREATE TABLE IF NOT EXISTS artist_wins (
   updated_at TEXT NOT NULL
 );
 
+-- 歌手大比拼（artist-cup）专属夺冠榜；与「歌曲夺冠所属歌手」的 artist_wins 分离
+CREATE TABLE IF NOT EXISTS artist_pk_wins (
+  artist_id TEXT PRIMARY KEY,
+  name TEXT NOT NULL,
+  avatar TEXT NOT NULL DEFAULT '',
+  wins INTEGER NOT NULL DEFAULT 0,
+  updated_at TEXT NOT NULL
+);
+
 CREATE TABLE IF NOT EXISTS vote_quota_daily (
   voter_key TEXT NOT NULL,
   quota_date TEXT NOT NULL,
@@ -45,6 +54,7 @@ CREATE TABLE IF NOT EXISTS analytics_event_uniques (
 
 CREATE INDEX IF NOT EXISTS idx_song_wins ON song_wins (wins DESC);
 CREATE INDEX IF NOT EXISTS idx_artist_wins ON artist_wins (wins DESC);
+CREATE INDEX IF NOT EXISTS idx_artist_pk_wins ON artist_pk_wins (wins DESC);
 CREATE INDEX IF NOT EXISTS idx_vote_quota_date ON vote_quota_daily (quota_date, used_count DESC);
 CREATE INDEX IF NOT EXISTS idx_analytics_events_date ON analytics_events_daily (event_date DESC, event_name);
 CREATE INDEX IF NOT EXISTS idx_analytics_uniques_date ON analytics_event_uniques (event_date DESC);
@@ -97,3 +107,10 @@ CREATE TABLE IF NOT EXISTS hangla_artist_stats (
 
 CREATE INDEX IF NOT EXISTS idx_hangla_hang ON hangla_artist_stats (hang_wins DESC, name ASC);
 CREATE INDEX IF NOT EXISTS idx_hangla_lale ON hangla_artist_stats (lale_wins DESC, name ASC);
+
+-- 各玩法参与局数（夯拉历史无独立局数表，用本表累计；歌曲/厂牌/歌手PK可从业务表推算）
+CREATE TABLE IF NOT EXISTS participation_stats (
+  mode TEXT PRIMARY KEY,
+  plays INTEGER NOT NULL DEFAULT 0,
+  updated_at TEXT NOT NULL
+);

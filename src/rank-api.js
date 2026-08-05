@@ -23,6 +23,11 @@ export async function fetchArtistRank({ limit = 100, q = "" } = {}) {
   return getJson("/artists", { limit, q });
 }
 
+/** 歌手大比拼专属夺冠榜（与歌曲夺冠所属歌手榜分离） */
+export async function fetchArtistPkRank({ limit = 100, q = "" } = {}) {
+  return getJson("/artists-pk", { limit, q });
+}
+
 export async function fetchLabelBeefRank({ limit = 200, q = "" } = {}) {
   return getJson("/labels", { limit, q });
 }
@@ -95,6 +100,7 @@ export async function fetchRankMeta() {
       totalWins: 0,
       totalSongWins: 0,
       totalArtistWins: 0,
+      participation: { total: 0, songPk: 0, artistPk: 0, label: 0, hangla: 0 },
     };
   }
 }
@@ -114,22 +120,36 @@ export async function reportChampionWin({
   loserLabelId = "",
   loserLabelName = "",
 } = {}) {
+  const isArtistCup = cupType === "artist-cup";
+  const isLabelBeef = cupType === "label-beef";
   const songId = String(song?.neteaseId || song?.id || "").trim();
-  if (!/^\d+$/.test(songId)) {
+  const resolvedArtistId = String(
+    artistId || (isArtistCup ? songId : "") || ""
+  ).trim();
+
+  if (isArtistCup) {
+    if (!/^\d+$/.test(resolvedArtistId)) {
+      return { ok: false, skipped: true, reason: "no artist id", milestone: false };
+    }
+  } else if (!/^\d+$/.test(songId)) {
     return { ok: false, skipped: true, reason: "no song id", milestone: false };
   }
 
-  const isLabelBeef = cupType === "label-beef";
   const dedupeKey = isLabelBeef
     ? `cn-rap-cup:reported-win:beef:${winnerLabelId || ""}:${loserLabelId || ""}:${songId}`
-    : `cn-rap-cup:reported-win:${artistId || ""}:${songId}`;
+    : isArtistCup
+      ? `cn-rap-cup:reported-win:artist-cup:${resolvedArtistId}`
+      : `cn-rap-cup:reported-win:${artistId || ""}:${songId}`;
   const milestoneKey = `${dedupeKey}:milestone`;
   const milestoneShownKey = `${dedupeKey}:milestone-shown`;
+  const winsCacheKey = isArtistCup
+    ? `cn-rap-cup:artist-wins:${resolvedArtistId}`
+    : `cn-rap-cup:song-wins:${songId}`;
   try {
     if (sessionStorage.getItem(dedupeKey)) {
       const alreadyShown = sessionStorage.getItem(milestoneShownKey);
       const savedNo = Number(sessionStorage.getItem(milestoneKey) || 0);
-      const cachedWins = Number(sessionStorage.getItem(`cn-rap-cup:song-wins:${songId}`) || 0) || null;
+      const cachedWins = Number(sessionStorage.getItem(winsCacheKey) || 0) || null;
       if (!alreadyShown && savedNo >= 100 && savedNo % 100 === 0) {
         return {
           ok: true,
@@ -137,6 +157,7 @@ export async function reportChampionWin({
           reason: "already reported",
           participantNo: savedNo,
           songWins: cachedWins,
+          artistWins: isArtistCup ? cachedWins : null,
           milestone: true,
         };
       }
@@ -145,6 +166,7 @@ export async function reportChampionWin({
         skipped: true,
         reason: "already reported",
         songWins: cachedWins,
+        artistWins: isArtistCup ? cachedWins : null,
         milestone: false,
       };
     }
@@ -152,18 +174,19 @@ export async function reportChampionWin({
 
   const displayArtist = isLabelBeef
     ? songArtist || song?.rosterArtistName || song?.artist || ""
-    : artistName || song?.artist || "";
+    : isArtistCup
+      ? artistName || song?.title || song?.rosterArtistName || ""
+      : artistName || song?.artist || "";
 
   const payload = {
-    songId,
-    artistId: artistId ? String(artistId) : "",
+    songId: isArtistCup ? resolvedArtistId : songId,
+    artistId: resolvedArtistId,
     title: song.title || "",
-    // 用你选择开赛的那位歌手名（如「艾志恒Asen」），不用网易云合作艺人串
     artist: displayArtist,
-    artistName: isLabelBeef ? displayArtist : artistName || song?.artist || "",
+    artistName: isLabelBeef || isArtistCup ? displayArtist : artistName || song?.artist || "",
     songArtist: displayArtist,
     cover: song.cover || song.coverSm || "",
-    avatar: artistAvatar || "",
+    avatar: artistAvatar || song.cover || "",
     cupType: cupType || "",
     winnerLabelId: winnerLabelId || "",
     winnerLabelName: winnerLabelName || "",
@@ -199,10 +222,10 @@ export async function reportChampionWin({
     sessionStorage.setItem(dedupeKey, "1");
   } catch (_) {}
 
-  const songWins = Number(data.songWins || 0) || null;
+  const songWins = Number(data.songWins || data.artistWins || 0) || null;
   if (songWins != null) {
     try {
-      sessionStorage.setItem(`cn-rap-cup:song-wins:${songId}`, String(songWins));
+      sessionStorage.setItem(winsCacheKey, String(songWins));
     } catch (_) {}
   }
 

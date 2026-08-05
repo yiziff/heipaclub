@@ -71,9 +71,36 @@ export function drawHangLaField(artists, n = HANG_LA_COUNT, { minFans = 0, regio
       fans: a.fans || 0,
       city: a.city || "",
       tag: a.tag || "",
+      neteaseArtistId: a.neteaseArtistId || "",
     }))
   );
   return pool.slice(0, Math.min(n, pool.length));
+}
+
+/** 歌手大比拼签表规模（对齐单曲 32 强） */
+export const ARTIST_PK_COUNT = 32;
+
+/** Map roster artists → pseudo-songs for the existing bracket engine. */
+export function artistsToPkSongs(artists) {
+  return (artists || []).map((a, i) => {
+    const nid = String(a.neteaseArtistId || "").trim();
+    const fans = Number(a.fans || 0);
+    const fansLabel =
+      fans >= 10_000 ? `${Math.round(fans / 10_000)} 万粉` : fans > 0 ? `${fans} 粉` : "";
+    return {
+      id: nid || String(a.id || `artist-${i}`),
+      neteaseId: /^\d+$/.test(nid) ? nid : null,
+      title: a.name || "未知歌手",
+      artist: a.city || a.tag || "",
+      album: fansLabel,
+      collection: fansLabel,
+      cover: a.avatar || "",
+      coverSm: a.avatar || "",
+      rosterArtistId: String(a.id || ""),
+      rosterArtistName: a.name || "",
+      playSource: "none",
+    };
+  });
 }
 
 export function emptyHangLaState(field, { mode = "open" } = {}) {

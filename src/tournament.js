@@ -129,7 +129,7 @@ export function isRoundComplete(bracket, roundIndex) {
 }
 
 /** Music Cup–style interstitial copy for the round about to be played. */
-export function splashForBracket(bracket) {
+export function splashForBracket(bracket, { subject = "首歌", pickHint = "一首" } = {}) {
   const match = currentMatch(bracket);
   if (!match) return null;
   const idx = findRoundIndex(bracket, match.id);
@@ -142,7 +142,7 @@ export function splashForBracket(bracket) {
   else if (remaining === 8) title = "8强";
   return {
     title,
-    sub: `${remaining} 首歌 · ${matchCount} 场对决 · 点选更喜欢的一首`,
+    sub: `${remaining} ${subject} · ${matchCount} 场对决 · 点选更喜欢的${pickHint}`,
     remaining,
     roundIndex: idx,
   };
