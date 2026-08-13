@@ -108,6 +108,28 @@ CREATE TABLE IF NOT EXISTS hangla_artist_stats (
 CREATE INDEX IF NOT EXISTS idx_hangla_hang ON hangla_artist_stats (hang_wins DESC, name ASC);
 CREATE INDEX IF NOT EXISTS idx_hangla_lale ON hangla_artist_stats (lale_wins DESC, name ASC);
 
+-- 「谁是单挑王」：歌手夺冠 + 必杀曲
+CREATE TABLE IF NOT EXISTS duel_king_wins (
+  artist_id TEXT PRIMARY KEY,
+  name TEXT NOT NULL,
+  avatar TEXT NOT NULL DEFAULT '',
+  wins INTEGER NOT NULL DEFAULT 0,
+  updated_at TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS duel_king_songs (
+  artist_id TEXT NOT NULL,
+  song_id TEXT NOT NULL,
+  title TEXT NOT NULL DEFAULT '',
+  cover TEXT NOT NULL DEFAULT '',
+  wins INTEGER NOT NULL DEFAULT 0,
+  updated_at TEXT NOT NULL,
+  PRIMARY KEY (artist_id, song_id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_duel_king_wins ON duel_king_wins (wins DESC);
+CREATE INDEX IF NOT EXISTS idx_duel_king_songs ON duel_king_songs (artist_id, wins DESC);
+
 -- 各玩法参与局数（夯拉历史无独立局数表，用本表累计；歌曲/厂牌/歌手PK可从业务表推算）
 CREATE TABLE IF NOT EXISTS participation_stats (
   mode TEXT PRIMARY KEY,

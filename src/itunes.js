@@ -430,7 +430,7 @@ export async function enrichSongsPlaySourceProgressive(
   songs,
   artistName,
   {
-    concurrency = 6,
+    concurrency = 2,
     artistAliases = [],
     mapArtistId = "",
     readyCount = 4,

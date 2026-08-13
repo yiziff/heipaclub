@@ -4,15 +4,114 @@
  */
 
 const BASE = "/api/rank";
+const LOCAL_RANK_PREFIX = "heipa-rank-cache:v1:";
 
-async function getJson(path, query = {}) {
+function sleep(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+function rankCacheKey(path, query = {}) {
+  const parts = [path];
+  for (const k of Object.keys(query).sort()) {
+    const v = query[k];
+    if (v == null || v === "") continue;
+    // Search is filtered client-side from full board cache — keep one bucket per board.
+    if (k === "q") continue;
+    parts.push(`${k}=${v}`);
+  }
+  return LOCAL_RANK_PREFIX + parts.join("|");
+}
+
+function readLocalRank(path, query = {}) {
+  try {
+    const raw = localStorage.getItem(rankCacheKey(path, query));
+    if (!raw) return null;
+    const parsed = JSON.parse(raw);
+    if (!parsed || typeof parsed !== "object" || !parsed.data) return null;
+    return parsed;
+  } catch {
+    return null;
+  }
+}
+
+function writeLocalRank(path, query, data) {
+  try {
+    localStorage.setItem(
+      rankCacheKey(path, query),
+      JSON.stringify({ savedAt: Date.now(), data })
+    );
+  } catch {
+    /* quota / private mode */
+  }
+}
+
+/**
+ * Rank GET with timeout + exponential backoff.
+ * On total failure, returns last successful local snapshot with `_stale: true`
+ * so the board never blanks during livestream / CF edge 429.
+ * @param {string} path
+ * @param {Record<string, unknown>} [query]
+ * @param {{ timeoutMs?: number, retries?: number }} [opts]
+ */
+async function getJson(path, query = {}, { timeoutMs = 12000, retries = 2 } = {}) {
   const url = new URL(BASE + path, window.location.origin);
   for (const [k, v] of Object.entries(query)) {
     if (v != null && v !== "") url.searchParams.set(k, String(v));
   }
-  const res = await fetch(url);
-  if (!res.ok) throw new Error(`rank ${path} HTTP ${res.status}`);
-  return res.json();
+
+  let lastErr;
+  for (let attempt = 0; attempt <= retries; attempt++) {
+    const ctrl = new AbortController();
+    const timer = setTimeout(() => ctrl.abort(), timeoutMs);
+    try {
+      const res = await fetch(url, { signal: ctrl.signal, credentials: "same-origin" });
+      clearTimeout(timer);
+      if (res.status === 429 || res.status >= 500) {
+        lastErr = new Error(`rank ${path} HTTP ${res.status}`);
+        if (attempt < retries) {
+          await sleep(500 * 2 ** attempt);
+          continue;
+        }
+        break;
+      }
+      if (!res.ok) {
+        lastErr = new Error(`rank ${path} HTTP ${res.status}`);
+        break;
+      }
+      const ctype = res.headers.get("content-type") || "";
+      if (!ctype.includes("application/json")) {
+        lastErr = new Error(`rank ${path} non-json`);
+        if (attempt < retries) {
+          await sleep(500 * 2 ** attempt);
+          continue;
+        }
+        break;
+      }
+      const data = await res.json();
+      writeLocalRank(path, query, data);
+      if (res.headers.get("X-Rank-Cache") === "KV-STALE" || data?._stale) {
+        return { ...data, _stale: true };
+      }
+      return data;
+    } catch (e) {
+      clearTimeout(timer);
+      lastErr = e?.name === "AbortError" ? new Error(`rank ${path} timeout`) : e;
+      if (attempt < retries) {
+        await sleep(300 * 2 ** attempt);
+        continue;
+      }
+    }
+  }
+
+  const cached = readLocalRank(path, query);
+  if (cached?.data) {
+    return {
+      ...cached.data,
+      _stale: true,
+      _staleSavedAt: cached.savedAt || null,
+    };
+  }
+  throw lastErr || new Error(`rank ${path} failed`);
 }
 
 export async function fetchSongRank({ limit = 150, q = "" } = {}) {
@@ -26,6 +125,18 @@ export async function fetchArtistRank({ limit = 100, q = "" } = {}) {
 /** 歌手大比拼专属夺冠榜（与歌曲夺冠所属歌手榜分离） */
 export async function fetchArtistPkRank({ limit = 100, q = "" } = {}) {
   return getJson("/artists-pk", { limit, q });
+}
+
+/** 谁是单挑王 · 歌手夺冠榜 */
+export async function fetchDuelKingRank({ limit = 100, q = "" } = {}) {
+  return getJson("/duel-king", { limit, q });
+}
+
+/** 某歌手的单挑必杀曲 */
+export async function fetchDuelKingSongs(artistId) {
+  const id = encodeURIComponent(String(artistId || "").trim());
+  if (!id) throw new Error("rank /duel-king songs: missing id");
+  return getJson(`/duel-king/${id}/songs`);
 }
 
 export async function fetchLabelBeefRank({ limit = 200, q = "" } = {}) {
@@ -122,9 +233,10 @@ export async function reportChampionWin({
 } = {}) {
   const isArtistCup = cupType === "artist-cup";
   const isLabelBeef = cupType === "label-beef";
+  const isDuelKing = cupType === "duel-king";
   const songId = String(song?.neteaseId || song?.id || "").trim();
   const resolvedArtistId = String(
-    artistId || (isArtistCup ? songId : "") || ""
+    artistId || (isArtistCup ? songId : "") || song?.rosterArtistId || ""
   ).trim();
 
   if (isArtistCup) {
@@ -134,12 +246,17 @@ export async function reportChampionWin({
   } else if (!/^\d+$/.test(songId)) {
     return { ok: false, skipped: true, reason: "no song id", milestone: false };
   }
+  if (isDuelKing && !resolvedArtistId) {
+    return { ok: false, skipped: true, reason: "no duel artist id", milestone: false };
+  }
 
   const dedupeKey = isLabelBeef
     ? `cn-rap-cup:reported-win:beef:${winnerLabelId || ""}:${loserLabelId || ""}:${songId}`
     : isArtistCup
       ? `cn-rap-cup:reported-win:artist-cup:${resolvedArtistId}`
-      : `cn-rap-cup:reported-win:${artistId || ""}:${songId}`;
+      : isDuelKing
+        ? `cn-rap-cup:reported-win:duel-king:${resolvedArtistId}:${songId}`
+        : `cn-rap-cup:reported-win:${artistId || ""}:${songId}`;
   const milestoneKey = `${dedupeKey}:milestone`;
   const milestoneShownKey = `${dedupeKey}:milestone-shown`;
   const winsCacheKey = isArtistCup
@@ -172,7 +289,7 @@ export async function reportChampionWin({
     }
   } catch (_) {}
 
-  const displayArtist = isLabelBeef
+  const displayArtist = isLabelBeef || isDuelKing
     ? songArtist || song?.rosterArtistName || song?.artist || ""
     : isArtistCup
       ? artistName || song?.title || song?.rosterArtistName || ""
@@ -183,7 +300,7 @@ export async function reportChampionWin({
     artistId: resolvedArtistId,
     title: song.title || "",
     artist: displayArtist,
-    artistName: isLabelBeef || isArtistCup ? displayArtist : artistName || song?.artist || "",
+    artistName: isLabelBeef || isArtistCup || isDuelKing ? displayArtist : artistName || song?.artist || "",
     songArtist: displayArtist,
     cover: song.cover || song.coverSm || "",
     avatar: artistAvatar || song.cover || "",

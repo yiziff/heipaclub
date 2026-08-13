@@ -38,10 +38,303 @@ const ANALYTICS_EVENTS = new Set([
   "share_image_ready",
   "cup_start",
   "about_open",
+  "perf_lcp_slow",
+  "perf_inp_slow",
+  "perf_cls_poor",
 ]);
 let quotaSchemaReady = false;
 let analyticsSchemaReady = false;
 let participationSchemaReady = false;
+
+const RANK_CACHE_TTL_SEC = 120;
+const PARTICIPATION_TTL_MS = 30_000;
+/** Cron every 5m refreshes; long TTL so a missed cron never bare-metal D1 under livestream. */
+const RANK_SNAPSHOT_TTL_SEC = 60 * 60 * 6;
+const SONG_URL_TTL_SEC = 180;
+const NETEASE_SEARCH_TTL_SEC = 300;
+const NETEASE_SONGS_TTL_SEC = 600;
+const NETEASE_STALE_TTL_SEC = 3600;
+const RATE_WINDOW_MS = 60_000;
+/** Only applies to D1-origin rank GETs after KV/edge miss */
+const RATE_LIMIT_RANK = 120;
+const RATE_LIMIT_NETEASE = 40;
+
+const IMG_PLACEHOLDER_SVG =
+  `<svg xmlns="http://www.w3.org/2000/svg" width="320" height="320"><rect fill="#e6e4df" width="100%" height="100%"/></svg>`;
+const IMG_KV_PREFIX = "img:v1:";
+const IMG_MANIFEST_KEY = "img:manifest:v1";
+const IMG_KV_TTL_SEC = 60 * 60 * 24 * 30;
+const IMG_WARM_BATCH = 20;
+
+/** @type {{ at: number, value: any } | null} */
+let participationMemo = null;
+/** @type {Map<string, { t: number, n: number }>} */
+const rateBuckets = new Map();
+let recentFiveXx = 0;
+let rateLimitTrips = 0;
+let loadWindowStarted = Date.now();
+
+function decayLoadCounters() {
+  const now = Date.now();
+  if (now - loadWindowStarted > RATE_WINDOW_MS) {
+    recentFiveXx = 0;
+    rateLimitTrips = 0;
+    loadWindowStarted = now;
+    if (rateBuckets.size > 4000) rateBuckets.clear();
+  }
+}
+
+function noteFiveXx() {
+  decayLoadCounters();
+  recentFiveXx += 1;
+}
+
+function clientKey(request) {
+  return (
+    clampStr(request.headers.get("CF-Connecting-IP"), 80) ||
+    clampStr(request.headers.get("X-Forwarded-For")?.split(",")[0], 80) ||
+    "ip:unknown"
+  );
+}
+
+function rateLimitHit(request, bucket, limit) {
+  decayLoadCounters();
+  const ip = clientKey(request);
+  // Never share one global bucket — unknown IP must not throttle the whole site.
+  if (!ip || ip === "ip:unknown") return false;
+  const key = `${bucket}:${ip}`;
+  const now = Date.now();
+  const cur = rateBuckets.get(key) || { t: now, n: 0 };
+  if (now - cur.t > RATE_WINDOW_MS) {
+    cur.t = now;
+    cur.n = 0;
+  }
+  cur.n += 1;
+  rateBuckets.set(key, cur);
+  if (cur.n > limit) {
+    rateLimitTrips += 1;
+    return true;
+  }
+  return false;
+}
+
+function rateLimitedResponse(request, bucket, limit) {
+  if (!rateLimitHit(request, bucket, limit)) return null;
+  return new Response(JSON.stringify({ ok: false, error: "rate_limited", retryAfter: 30 }), {
+    status: 429,
+    headers: {
+      "Content-Type": "application/json; charset=utf-8",
+      "Retry-After": "30",
+      "Cache-Control": "no-store",
+      ...cors,
+    },
+  });
+}
+
+function jsonCached(data, { ttl = RANK_CACHE_TTL_SEC, cacheStatus = "MISS", extra = {} } = {}) {
+  return new Response(JSON.stringify(data), {
+    status: 200,
+    headers: {
+      "Content-Type": "application/json; charset=utf-8",
+      "Cache-Control": `public, max-age=${ttl}, s-maxage=${ttl}`,
+      "X-Rank-Cache": cacheStatus,
+      ...extra,
+      ...cors,
+    },
+  });
+}
+
+async function cachedProducerResponse(cacheUrl, producer, ttlSec, headerName = "X-Rank-Cache") {
+  const cache = caches.default;
+  const cacheKey = new Request(cacheUrl, { method: "GET" });
+  try {
+    const hit = await cache.match(cacheKey);
+    if (hit) {
+      const headers = new Headers(hit.headers);
+      headers.set(headerName, "HIT");
+      Object.entries(cors).forEach(([k, v]) => headers.set(k, v));
+      return new Response(hit.body, { status: hit.status, headers });
+    }
+  } catch {
+    /* ignore */
+  }
+  const res = await producer();
+  if (res.status !== 200) return res;
+  const headers = new Headers(res.headers);
+  headers.set("Cache-Control", `public, max-age=${ttlSec}, s-maxage=${ttlSec}`);
+  headers.set(headerName, headers.get(headerName) || "MISS");
+  Object.entries(cors).forEach(([k, v]) => headers.set(k, v));
+  const out = new Response(res.body, { status: 200, headers });
+  try {
+    await cache.put(cacheKey, out.clone());
+  } catch {
+    /* ignore */
+  }
+  return out;
+}
+
+/** Edge Cache API hit only — no D1. Used before rate-limit so hot paths never 429. */
+async function tryServeRankEdgeCache(path, url) {
+  const cacheUrl = `https://rank-cache.heipaclub.internal${path}?${url.searchParams}`;
+  try {
+    const hit = await caches.default.match(new Request(cacheUrl, { method: "GET" }));
+    if (!hit || hit.status !== 200) return null;
+    const headers = new Headers(hit.headers);
+    headers.set("X-Rank-Cache", "HIT");
+    Object.entries(cors).forEach(([k, v]) => headers.set(k, v));
+    return new Response(hit.body, { status: 200, headers });
+  } catch {
+    return null;
+  }
+}
+
+function rankSnapshotKind(path) {
+  if (path.endsWith("/api/rank/meta")) return "meta";
+  if (path.endsWith("/api/rank/songs")) return "songs";
+  if (path.endsWith("/api/rank/artists")) return "artists";
+  if (path.endsWith("/api/rank/artists-pk")) return "artists-pk";
+  if (path.endsWith("/api/rank/duel-king")) return "duel-king";
+  if (path.endsWith("/api/rank/labels")) return "labels";
+  if (path.endsWith("/api/rank/hangla")) return "hangla";
+  return "";
+}
+
+function rankFreshKey(kind) {
+  return `rank:v1:${kind}`;
+}
+
+function rankStaleKey(kind) {
+  return `rank:stale:v1:${kind}`;
+}
+
+function formatRankSnapshot(kind, snap, limit) {
+  if (!snap || typeof snap !== "object") return null;
+  if (kind === "songs" || kind === "artists" || kind === "artists-pk" || kind === "labels") {
+    const items = Array.isArray(snap.items) ? snap.items.slice(0, limit) : [];
+    return { ...snap, items, staleOk: true };
+  }
+  if (kind === "hangla") {
+    return {
+      ...snap,
+      hang: Array.isArray(snap.hang) ? snap.hang.slice(0, limit) : [],
+      lale: Array.isArray(snap.lale) ? snap.lale.slice(0, limit) : [],
+      staleOk: true,
+    };
+  }
+  return { ...snap, staleOk: true };
+}
+
+async function putRankSnapshots(env, kind, text) {
+  if (!env?.ARTIST_TOP || !kind || !text) return;
+  await env.ARTIST_TOP.put(rankFreshKey(kind), text, {
+    expirationTtl: RANK_SNAPSHOT_TTL_SEC,
+  });
+  // Permanent fallback so livestream never blanks the board.
+  await env.ARTIST_TOP.put(rankStaleKey(kind), text);
+}
+
+/**
+ * Prefer fresh KV, then permanent stale. With `q`, still return full board
+ * (client filters) so search never forces a D1 miss under load.
+ */
+async function tryServeRankSnapshot(env, path, url, { allowStale = true } = {}) {
+  const kind = rankSnapshotKind(path);
+  if (!kind || !env.ARTIST_TOP) return null;
+  const limit = Math.max(1, Number(url.searchParams.get("limit") || 200));
+  try {
+    let snap = await env.ARTIST_TOP.get(rankFreshKey(kind), "json");
+    let status = "KV";
+    if (!snap && allowStale) {
+      snap = await env.ARTIST_TOP.get(rankStaleKey(kind), "json");
+      status = "KV-STALE";
+    }
+    if (!snap) return null;
+    const body = formatRankSnapshot(kind, snap, limit);
+    if (!body) return null;
+    if (status === "KV-STALE") body._stale = true;
+    return jsonCached(body, { cacheStatus: status });
+  } catch {
+    return null;
+  }
+}
+
+async function precomputeRankSnapshots(env) {
+  if (!env.DB || !env.ARTIST_TOP) return;
+  const jobs = [
+    ["/api/rank/meta", "meta"],
+    ["/api/rank/songs?limit=200", "songs"],
+    ["/api/rank/artists?limit=200", "artists"],
+    ["/api/rank/artists-pk?limit=200", "artists-pk"],
+    ["/api/rank/duel-king?limit=200", "duel-king"],
+    ["/api/rank/labels?limit=200", "labels"],
+    ["/api/rank/hangla?limit=100", "hangla"],
+  ];
+  for (const [pathWithQuery, kind] of jobs) {
+    try {
+      const req = new Request(`https://heipaclub.com${pathWithQuery}`);
+      const url = new URL(req.url);
+      const path = url.pathname.replace(/\/+$/, "") || "/";
+      const res = await handleRank(req, env, path, url);
+      if (!res.ok) continue;
+      const text = await res.text();
+      await putRankSnapshots(env, kind, text);
+      try {
+        const cacheUrl = `https://rank-cache.heipaclub.internal${path}?${url.searchParams}`;
+        await caches.default.put(
+          new Request(cacheUrl, { method: "GET" }),
+          new Response(text, {
+            status: 200,
+            headers: {
+              "Content-Type": "application/json; charset=utf-8",
+              "Cache-Control": `public, max-age=${RANK_CACHE_TTL_SEC}, s-maxage=${RANK_CACHE_TTL_SEC}`,
+              "X-Rank-Cache": "CRON",
+              ...cors,
+            },
+          })
+        );
+      } catch {
+        /* edge put best-effort */
+      }
+    } catch {
+      /* snapshot best-effort */
+    }
+  }
+}
+
+async function handleHealth(env) {
+  decayLoadCounters();
+  const t0 = Date.now();
+  let d1Ms = null;
+  let d1Ok = false;
+  try {
+    if (env.DB) {
+      await env.DB.prepare("SELECT 1 AS ok").first();
+      d1Ms = Date.now() - t0;
+      d1Ok = true;
+    }
+  } catch {
+    d1Ms = Date.now() - t0;
+  }
+  const load =
+    recentFiveXx >= 8 || rateLimitTrips >= 12 || (d1Ms != null && d1Ms > 800)
+      ? "high"
+      : "normal";
+  return json({
+    ok: true,
+    load,
+    d1: {
+      ok: d1Ok,
+      ms: d1Ms,
+      hint:
+        d1Ms != null && d1Ms > 200
+          ? "D1 P95 high — consider paid D1 if this persists under livestream traffic"
+          : "ok",
+    },
+    neteaseOriginConfigured: Boolean(String(env.NETEASE_API_ORIGIN || "").trim()),
+    fiveXxWindow: recentFiveXx,
+    rateLimitTrips,
+  });
+}
 
 function clampStr(s, n) {
   return String(s || "").trim().slice(0, n);
@@ -438,6 +731,74 @@ async function getParticipationStats(env) {
   return { total, songPk, artistPk, label, hangla, songAll };
 }
 
+async function getParticipationStatsCached(env) {
+  const now = Date.now();
+  if (participationMemo?.value && now - participationMemo.at < PARTICIPATION_TTL_MS) {
+    return participationMemo.value;
+  }
+  const value = await getParticipationStats(env);
+  participationMemo = { at: now, value };
+  return value;
+}
+
+function invalidateParticipationMemo() {
+  participationMemo = null;
+}
+
+async function ensureDuelKingTables(env) {
+  await env.DB.batch([
+    env.DB.prepare(
+      `CREATE TABLE IF NOT EXISTS duel_king_wins (
+        artist_id TEXT PRIMARY KEY,
+        name TEXT NOT NULL,
+        avatar TEXT NOT NULL DEFAULT '',
+        wins INTEGER NOT NULL DEFAULT 0,
+        updated_at TEXT NOT NULL
+      )`
+    ),
+    env.DB.prepare(
+      `CREATE TABLE IF NOT EXISTS duel_king_songs (
+        artist_id TEXT NOT NULL,
+        song_id TEXT NOT NULL,
+        title TEXT NOT NULL DEFAULT '',
+        cover TEXT NOT NULL DEFAULT '',
+        wins INTEGER NOT NULL DEFAULT 0,
+        updated_at TEXT NOT NULL,
+        PRIMARY KEY (artist_id, song_id)
+      )`
+    ),
+    env.DB.prepare(
+      `CREATE INDEX IF NOT EXISTS idx_duel_king_wins ON duel_king_wins (wins DESC)`
+    ),
+    env.DB.prepare(
+      `CREATE INDEX IF NOT EXISTS idx_duel_king_songs ON duel_king_songs (artist_id, wins DESC)`
+    ),
+  ]);
+}
+
+function duelKingStatements(env, { artistId, name, avatar, songId, title, cover, now }) {
+  return [
+    env.DB.prepare(
+      `INSERT INTO duel_king_wins (artist_id, name, avatar, wins, updated_at)
+       VALUES (?, ?, ?, 1, ?)
+       ON CONFLICT(artist_id) DO UPDATE SET
+         name = excluded.name,
+         avatar = CASE WHEN excluded.avatar != '' THEN excluded.avatar ELSE duel_king_wins.avatar END,
+         wins = duel_king_wins.wins + 1,
+         updated_at = excluded.updated_at`
+    ).bind(artistId, name || "未知歌手", avatar || cover || "", now),
+    env.DB.prepare(
+      `INSERT INTO duel_king_songs (artist_id, song_id, title, cover, wins, updated_at)
+       VALUES (?, ?, ?, ?, 1, ?)
+       ON CONFLICT(artist_id, song_id) DO UPDATE SET
+         title = excluded.title,
+         cover = CASE WHEN excluded.cover != '' THEN excluded.cover ELSE duel_king_songs.cover END,
+         wins = duel_king_songs.wins + 1,
+         updated_at = excluded.updated_at`
+    ).bind(artistId, songId, title || "", cover || "", now),
+  ];
+}
+
 async function handleRank(request, env, path, url) {
   if (request.method === "GET" && path.endsWith("/api/rank/meta")) {
     const songCount = await env.DB.prepare(
@@ -446,7 +807,7 @@ async function handleRank(request, env, path, url) {
     const artistCount = await env.DB.prepare("SELECT COUNT(*) AS c FROM artist_wins").first();
     const artistPkCount = await env.DB.prepare("SELECT COUNT(*) AS c FROM artist_pk_wins").first().catch(() => ({ c: 0 }));
     const latest = await env.DB.prepare("SELECT MAX(updated_at) AS t FROM song_wins").first();
-    const participation = await getParticipationStats(env);
+    const participation = await getParticipationStatsCached(env);
     return json({
       updatedAt: latest?.t || null,
       songCount: songCount?.c || 0,
@@ -505,7 +866,7 @@ async function handleRank(request, env, path, url) {
       env.DB.prepare(
         "SELECT COUNT(DISTINCT lower(trim(title))) AS c FROM song_wins"
       ).first(),
-      getParticipationStats(env),
+      getParticipationStatsCached(env),
     ]);
     return json({
       updatedAt: latest,
@@ -541,7 +902,7 @@ async function handleRank(request, env, path, url) {
         "SELECT COUNT(DISTINCT lower(trim(title))) AS c FROM song_wins"
       ).first(),
       env.DB.prepare("SELECT COUNT(*) AS c FROM artist_wins").first(),
-      getParticipationStats(env),
+      getParticipationStatsCached(env),
     ]);
     return json({
       updatedAt: rows.results?.[0]?.updatedAt || null,
@@ -578,7 +939,7 @@ async function handleRank(request, env, path, url) {
         "SELECT COUNT(DISTINCT lower(trim(title))) AS c FROM song_wins"
       ).first(),
       env.DB.prepare("SELECT COUNT(*) AS c FROM artist_pk_wins").first(),
-      getParticipationStats(env),
+      getParticipationStatsCached(env),
     ]);
     return json({
       updatedAt: rows.results?.[0]?.updatedAt || null,
@@ -586,6 +947,75 @@ async function handleRank(request, env, path, url) {
       songCount: Number(songCount?.c || 0),
       artistCount: Number(artistPkCount?.c || 0),
       participation,
+      items: rows.results || [],
+    });
+  }
+
+  if (request.method === "GET" && path.endsWith("/api/rank/duel-king")) {
+    await ensureDuelKingTables(env);
+    const limit = Math.min(2000, Math.max(1, Number(url.searchParams.get("limit") || 200)));
+    const q = clampStr(url.searchParams.get("q"), 80).toLowerCase();
+    let rows;
+    if (q) {
+      rows = await env.DB.prepare(
+        `SELECT artist_id AS artistId, name, avatar, wins, updated_at AS updatedAt
+         FROM duel_king_wins WHERE lower(name) LIKE ?
+         ORDER BY wins DESC, name ASC LIMIT ?`
+      )
+        .bind(`%${q}%`, limit)
+        .all();
+    } else {
+      rows = await env.DB.prepare(
+        `SELECT artist_id AS artistId, name, avatar, wins, updated_at AS updatedAt
+         FROM duel_king_wins ORDER BY wins DESC, name ASC LIMIT ?`
+      )
+        .bind(limit)
+        .all();
+    }
+    const [songCount, duelCount, participation] = await Promise.all([
+      env.DB.prepare(
+        "SELECT COUNT(DISTINCT lower(trim(title))) AS c FROM song_wins"
+      ).first(),
+      env.DB.prepare("SELECT COUNT(*) AS c FROM duel_king_wins").first().catch(() => ({ c: 0 })),
+      getParticipationStatsCached(env),
+    ]);
+    return json({
+      updatedAt: rows.results?.[0]?.updatedAt || null,
+      totalWins: Number(
+        (
+          await env.DB.prepare("SELECT COALESCE(SUM(wins), 0) AS t FROM duel_king_wins")
+            .first()
+            .catch(() => ({ t: 0 }))
+        )?.t || 0
+      ),
+      songCount: Number(songCount?.c || 0),
+      artistCount: Number(duelCount?.c || 0),
+      participation,
+      items: rows.results || [],
+    });
+  }
+
+  const duelKingSongsMatch = path.match(/^\/api\/rank\/duel-king\/([^/]+)\/songs$/);
+  if (request.method === "GET" && duelKingSongsMatch) {
+    await ensureDuelKingTables(env);
+    const artistId = decodeURIComponent(duelKingSongsMatch[1] || "").trim();
+    if (!artistId) return json({ error: "bad artist id" }, 400);
+    const self = await env.DB.prepare(
+      `SELECT artist_id AS artistId, name, avatar, wins, updated_at AS updatedAt
+       FROM duel_king_wins WHERE artist_id = ?`
+    )
+      .bind(artistId)
+      .first();
+    const rows = await env.DB.prepare(
+      `SELECT song_id AS songId, title, cover, wins, updated_at AS updatedAt
+       FROM duel_king_songs
+       WHERE artist_id = ?
+       ORDER BY wins DESC, title ASC`
+    )
+      .bind(artistId)
+      .all();
+    return json({
+      artist: self || { artistId, name: "", avatar: "", wins: 0 },
       items: rows.results || [],
     });
   }
@@ -709,7 +1139,7 @@ async function handleRank(request, env, path, url) {
       env.DB.prepare(
         "SELECT COUNT(DISTINCT lower(trim(title))) AS c FROM song_wins"
       ).first(),
-      getParticipationStats(env),
+      getParticipationStatsCached(env),
     ]);
     const items = (rows.results || []).map((r) => {
       const battles = Number(r.battles || 0);
@@ -757,7 +1187,7 @@ async function handleRank(request, env, path, url) {
       env.DB.prepare(
         "SELECT COUNT(DISTINCT lower(trim(title))) AS c FROM song_wins"
       ).first(),
-      getParticipationStats(env),
+      getParticipationStatsCached(env),
     ]);
     const hang = hangRows.results || [];
     const lale = laleRows.results || [];
@@ -823,33 +1253,33 @@ async function handleRank(request, env, path, url) {
     }
 
     await bumpHanglaParticipation(env, now).catch(() => {});
+    invalidateParticipationMemo();
 
-    for (const a of hang) {
-      await env.DB.prepare(
-        `INSERT INTO hangla_artist_stats (artist_id, name, avatar, hang_wins, lale_wins, updated_at)
-         VALUES (?, ?, ?, 1, 0, ?)
-         ON CONFLICT(artist_id) DO UPDATE SET
-           name = excluded.name,
-           avatar = CASE WHEN excluded.avatar != '' THEN excluded.avatar ELSE hangla_artist_stats.avatar END,
-           hang_wins = hangla_artist_stats.hang_wins + 1,
-           updated_at = excluded.updated_at`
-      )
-        .bind(a.artistId, a.name, a.avatar, now)
-        .run();
-    }
-    for (const a of lale) {
-      await env.DB.prepare(
-        `INSERT INTO hangla_artist_stats (artist_id, name, avatar, hang_wins, lale_wins, updated_at)
-         VALUES (?, ?, ?, 0, 1, ?)
-         ON CONFLICT(artist_id) DO UPDATE SET
-           name = excluded.name,
-           avatar = CASE WHEN excluded.avatar != '' THEN excluded.avatar ELSE hangla_artist_stats.avatar END,
-           lale_wins = hangla_artist_stats.lale_wins + 1,
-           updated_at = excluded.updated_at`
-      )
-        .bind(a.artistId, a.name, a.avatar, now)
-        .run();
-    }
+    const hanglaStmts = [
+      ...hang.map((a) =>
+        env.DB.prepare(
+          `INSERT INTO hangla_artist_stats (artist_id, name, avatar, hang_wins, lale_wins, updated_at)
+           VALUES (?, ?, ?, 1, 0, ?)
+           ON CONFLICT(artist_id) DO UPDATE SET
+             name = excluded.name,
+             avatar = CASE WHEN excluded.avatar != '' THEN excluded.avatar ELSE hangla_artist_stats.avatar END,
+             hang_wins = hangla_artist_stats.hang_wins + 1,
+             updated_at = excluded.updated_at`
+        ).bind(a.artistId, a.name, a.avatar, now)
+      ),
+      ...lale.map((a) =>
+        env.DB.prepare(
+          `INSERT INTO hangla_artist_stats (artist_id, name, avatar, hang_wins, lale_wins, updated_at)
+           VALUES (?, ?, ?, 0, 1, ?)
+           ON CONFLICT(artist_id) DO UPDATE SET
+             name = excluded.name,
+             avatar = CASE WHEN excluded.avatar != '' THEN excluded.avatar ELSE hangla_artist_stats.avatar END,
+             lale_wins = hangla_artist_stats.lale_wins + 1,
+             updated_at = excluded.updated_at`
+        ).bind(a.artistId, a.name, a.avatar, now)
+      ),
+    ];
+    if (hanglaStmts.length) await env.DB.batch(hanglaStmts);
 
     const headers = { ...cors, "Content-Type": "application/json; charset=utf-8" };
     if (setCookie) headers["Set-Cookie"] = setCookie;
@@ -875,9 +1305,10 @@ async function handleRank(request, env, path, url) {
     const cupType = clampStr(body.cupType, 32);
     const isLabelBeef = cupType === "label-beef";
     const isArtistCup = cupType === "artist-cup";
-    // Label beef: store roster artist on song rank; solo cups keep host artistName.
-    const artist = isLabelBeef
-      ? clampStr(body.songArtist || body.artist, 120)
+    const isDuelKing = cupType === "duel-king";
+    // Label beef / duel king: store roster artist on song rank; solo cups keep host artistName.
+    const artist = isLabelBeef || isDuelKing
+      ? clampStr(body.songArtist || body.artist || body.artistName, 120)
       : clampStr(body.artistName || body.artist, 120);
     const cover = clampStr(body.cover, 500);
     const avatar = clampStr(body.avatar, 500);
@@ -917,19 +1348,20 @@ async function handleRank(request, env, path, url) {
     }
 
     let artistWins = null;
+    invalidateParticipationMemo();
 
     if (isArtistCup) {
-      await env.DB.prepare(
-        `INSERT INTO artist_pk_wins (artist_id, name, avatar, wins, updated_at)
-         VALUES (?, ?, ?, 1, ?)
-         ON CONFLICT(artist_id) DO UPDATE SET
-           name = excluded.name,
-           avatar = CASE WHEN excluded.avatar != '' THEN excluded.avatar ELSE artist_pk_wins.avatar END,
-           wins = artist_pk_wins.wins + 1,
-           updated_at = excluded.updated_at`
-      )
-        .bind(artistId, artist || title || "未知歌手", avatar || cover, now)
-        .run();
+      await env.DB.batch([
+        env.DB.prepare(
+          `INSERT INTO artist_pk_wins (artist_id, name, avatar, wins, updated_at)
+           VALUES (?, ?, ?, 1, ?)
+           ON CONFLICT(artist_id) DO UPDATE SET
+             name = excluded.name,
+             avatar = CASE WHEN excluded.avatar != '' THEN excluded.avatar ELSE artist_pk_wins.avatar END,
+             wins = artist_pk_wins.wins + 1,
+             updated_at = excluded.updated_at`
+        ).bind(artistId, artist || title || "未知歌手", avatar || cover, now),
+      ]);
       const row = await env.DB.prepare("SELECT wins FROM artist_pk_wins WHERE artist_id = ?")
         .bind(artistId)
         .first();
@@ -961,56 +1393,74 @@ async function handleRank(request, env, path, url) {
       );
     }
 
-    await env.DB.prepare(
-      `INSERT INTO song_wins (song_id, title, artist, cover, artist_id, wins, updated_at)
-       VALUES (?, ?, ?, ?, ?, 1, ?)
-       ON CONFLICT(song_id) DO UPDATE SET
-         title = excluded.title,
-         artist = excluded.artist,
-         cover = CASE WHEN excluded.cover != '' THEN excluded.cover ELSE song_wins.cover END,
-         artist_id = CASE WHEN excluded.artist_id != '' THEN excluded.artist_id ELSE song_wins.artist_id END,
-         wins = song_wins.wins + 1,
-         updated_at = excluded.updated_at`
-    )
-      .bind(songId, title, artist, cover, artistId || "", now)
-      .run();
-
-    if (artistId && /^\d+$/.test(artistId)) {
-      await env.DB.prepare(
-        `INSERT INTO artist_wins (artist_id, name, avatar, wins, updated_at)
-         VALUES (?, ?, ?, 1, ?)
-         ON CONFLICT(artist_id) DO UPDATE SET
-           name = excluded.name,
-           avatar = CASE WHEN excluded.avatar != '' THEN excluded.avatar ELSE artist_wins.avatar END,
-           wins = artist_wins.wins + 1,
+    const winStmts = [
+      env.DB.prepare(
+        `INSERT INTO song_wins (song_id, title, artist, cover, artist_id, wins, updated_at)
+         VALUES (?, ?, ?, ?, ?, 1, ?)
+         ON CONFLICT(song_id) DO UPDATE SET
+           title = excluded.title,
+           artist = excluded.artist,
+           cover = CASE WHEN excluded.cover != '' THEN excluded.cover ELSE song_wins.cover END,
+           artist_id = CASE WHEN excluded.artist_id != '' THEN excluded.artist_id ELSE song_wins.artist_id END,
+           wins = song_wins.wins + 1,
            updated_at = excluded.updated_at`
-      )
-        .bind(artistId, artist || "未知歌手", avatar || cover, now)
-        .run();
-      const row = await env.DB.prepare("SELECT wins FROM artist_wins WHERE artist_id = ?")
-        .bind(artistId)
-        .first();
-      artistWins = row?.wins ?? null;
+      ).bind(songId, title, artist, cover, artistId || "", now),
+    ];
+    if (artistId && /^\d+$/.test(artistId)) {
+      winStmts.push(
+        env.DB.prepare(
+          `INSERT INTO artist_wins (artist_id, name, avatar, wins, updated_at)
+           VALUES (?, ?, ?, 1, ?)
+           ON CONFLICT(artist_id) DO UPDATE SET
+             name = excluded.name,
+             avatar = CASE WHEN excluded.avatar != '' THEN excluded.avatar ELSE artist_wins.avatar END,
+             wins = artist_wins.wins + 1,
+             updated_at = excluded.updated_at`
+        ).bind(artistId, artist || "未知歌手", avatar || cover, now)
+      );
     }
-
     if (
       isLabelBeef &&
       winnerLabelId &&
       loserLabelId &&
       winnerLabelId !== loserLabelId
     ) {
-      await bumpLabelBeefResult(env, {
-        winnerLabelId,
-        winnerLabelName,
-        loserLabelId,
-        loserLabelName,
-        avatar: avatar || cover,
-        now,
-        songId,
-        title,
-        artist,
-        cover,
-      });
+      winStmts.push(
+        ...labelBeefStatements(env, {
+          winnerLabelId,
+          winnerLabelName,
+          loserLabelId,
+          loserLabelName,
+          avatar: avatar || cover,
+          now,
+          songId,
+          title,
+          artist,
+          cover,
+        })
+      );
+    }
+    if (isDuelKing && artistId) {
+      await ensureDuelKingTables(env);
+      winStmts.push(
+        ...duelKingStatements(env, {
+          artistId,
+          name: artist || "未知歌手",
+          avatar: avatar || cover,
+          songId,
+          title,
+          cover,
+          now,
+        })
+      );
+    }
+    await env.DB.batch(winStmts);
+
+    if (artistId && /^\d+$/.test(artistId)) {
+      const row = await env.DB.prepare("SELECT wins FROM artist_wins WHERE artist_id = ?")
+        .bind(artistId)
+        .first();
+      artistWins = row?.wins ?? null;
     }
 
     const song = await env.DB.prepare(
@@ -1050,7 +1500,7 @@ async function handleRank(request, env, path, url) {
 }
 
 /** One finished label-beef cup: both +1 battle; winner +1 win; pairwise both ways. */
-async function bumpLabelBeefResult(
+function labelBeefStatements(
   env,
   {
     winnerLabelId,
@@ -1065,64 +1515,54 @@ async function bumpLabelBeefResult(
     cover,
   }
 ) {
-  await env.DB.prepare(
-    `INSERT INTO label_beef_stats (label_id, name, avatar, wins, battles, updated_at)
-     VALUES (?, ?, ?, 1, 1, ?)
-     ON CONFLICT(label_id) DO UPDATE SET
-       name = excluded.name,
-       avatar = CASE WHEN excluded.avatar != '' THEN excluded.avatar ELSE label_beef_stats.avatar END,
-       wins = label_beef_stats.wins + 1,
-       battles = label_beef_stats.battles + 1,
-       updated_at = excluded.updated_at`
-  )
-    .bind(winnerLabelId, winnerLabelName || winnerLabelId, avatar || "", now)
-    .run();
-
-  await env.DB.prepare(
-    `INSERT INTO label_beef_stats (label_id, name, avatar, wins, battles, updated_at)
-     VALUES (?, ?, ?, 0, 1, ?)
-     ON CONFLICT(label_id) DO UPDATE SET
-       name = excluded.name,
-       battles = label_beef_stats.battles + 1,
-       updated_at = excluded.updated_at`
-  )
-    .bind(loserLabelId, loserLabelName || loserLabelId, "", now)
-    .run();
-
-  await env.DB.prepare(
-    `INSERT INTO label_beef_matchups (label_id, opponent_id, wins, battles, updated_at)
-     VALUES (?, ?, 1, 1, ?)
-     ON CONFLICT(label_id, opponent_id) DO UPDATE SET
-       wins = label_beef_matchups.wins + 1,
-       battles = label_beef_matchups.battles + 1,
-       updated_at = excluded.updated_at`
-  )
-    .bind(winnerLabelId, loserLabelId, now)
-    .run();
-
-  await env.DB.prepare(
-    `INSERT INTO label_beef_matchups (label_id, opponent_id, wins, battles, updated_at)
-     VALUES (?, ?, 0, 1, ?)
-     ON CONFLICT(label_id, opponent_id) DO UPDATE SET
-       battles = label_beef_matchups.battles + 1,
-       updated_at = excluded.updated_at`
-  )
-    .bind(loserLabelId, winnerLabelId, now)
-    .run();
-
-  if (songId && title) {
-    await env.DB.prepare(
-      `INSERT INTO label_beef_champions
-         (label_id, opponent_id, song_id, title, artist, cover, wins, updated_at)
-       VALUES (?, ?, ?, ?, ?, ?, 1, ?)
-       ON CONFLICT(label_id, opponent_id, song_id) DO UPDATE SET
-         title = excluded.title,
-         artist = CASE WHEN excluded.artist != '' THEN excluded.artist ELSE label_beef_champions.artist END,
-         cover = CASE WHEN excluded.cover != '' THEN excluded.cover ELSE label_beef_champions.cover END,
-         wins = label_beef_champions.wins + 1,
+  const stmts = [
+    env.DB.prepare(
+      `INSERT INTO label_beef_stats (label_id, name, avatar, wins, battles, updated_at)
+       VALUES (?, ?, ?, 1, 1, ?)
+       ON CONFLICT(label_id) DO UPDATE SET
+         name = excluded.name,
+         avatar = CASE WHEN excluded.avatar != '' THEN excluded.avatar ELSE label_beef_stats.avatar END,
+         wins = label_beef_stats.wins + 1,
+         battles = label_beef_stats.battles + 1,
          updated_at = excluded.updated_at`
-    )
-      .bind(
+    ).bind(winnerLabelId, winnerLabelName || winnerLabelId, avatar || "", now),
+    env.DB.prepare(
+      `INSERT INTO label_beef_stats (label_id, name, avatar, wins, battles, updated_at)
+       VALUES (?, ?, ?, 0, 1, ?)
+       ON CONFLICT(label_id) DO UPDATE SET
+         name = excluded.name,
+         battles = label_beef_stats.battles + 1,
+         updated_at = excluded.updated_at`
+    ).bind(loserLabelId, loserLabelName || loserLabelId, "", now),
+    env.DB.prepare(
+      `INSERT INTO label_beef_matchups (label_id, opponent_id, wins, battles, updated_at)
+       VALUES (?, ?, 1, 1, ?)
+       ON CONFLICT(label_id, opponent_id) DO UPDATE SET
+         wins = label_beef_matchups.wins + 1,
+         battles = label_beef_matchups.battles + 1,
+         updated_at = excluded.updated_at`
+    ).bind(winnerLabelId, loserLabelId, now),
+    env.DB.prepare(
+      `INSERT INTO label_beef_matchups (label_id, opponent_id, wins, battles, updated_at)
+       VALUES (?, ?, 0, 1, ?)
+       ON CONFLICT(label_id, opponent_id) DO UPDATE SET
+         battles = label_beef_matchups.battles + 1,
+         updated_at = excluded.updated_at`
+    ).bind(loserLabelId, winnerLabelId, now),
+  ];
+  if (songId && title) {
+    stmts.push(
+      env.DB.prepare(
+        `INSERT INTO label_beef_champions
+           (label_id, opponent_id, song_id, title, artist, cover, wins, updated_at)
+         VALUES (?, ?, ?, ?, ?, ?, 1, ?)
+         ON CONFLICT(label_id, opponent_id, song_id) DO UPDATE SET
+           title = excluded.title,
+           artist = CASE WHEN excluded.artist != '' THEN excluded.artist ELSE label_beef_champions.artist END,
+           cover = CASE WHEN excluded.cover != '' THEN excluded.cover ELSE label_beef_champions.cover END,
+           wins = label_beef_champions.wins + 1,
+           updated_at = excluded.updated_at`
+      ).bind(
         winnerLabelId,
         loserLabelId,
         songId,
@@ -1131,12 +1571,76 @@ async function bumpLabelBeefResult(
         cover || "",
         now
       )
-      .run();
+    );
   }
+  return stmts;
 }
 
 /** 冷门歌手热门包 TTL：24 小时 */
 const ARTIST_TOP_TTL_SEC = 60 * 60 * 24;
+
+function neteaseCacheSpec(stripped, url) {
+  const p = String(stripped || "").replace(/\/+$/, "");
+  const path = p.startsWith("/") ? p : `/${p}`;
+  if (path === "/song/url/v1" || path === "/song/url") {
+    const id = String(url.searchParams.get("id") || "").trim();
+    if (!id) return null;
+    const level = String(url.searchParams.get("level") || "exhigh");
+    return {
+      key: `ne:url:v1:${id}:${level}`,
+      ttl: SONG_URL_TTL_SEC,
+      staleTtl: NETEASE_STALE_TTL_SEC,
+    };
+  }
+  if (path === "/cloudsearch" || path === "/search") {
+    const kw = String(url.searchParams.get("keywords") || "")
+      .trim()
+      .toLowerCase();
+    if (!kw) return null;
+    const type = String(url.searchParams.get("type") || "1");
+    const limit = String(url.searchParams.get("limit") || "");
+    return {
+      key: `ne:search:v1:${type}:${kw}:${limit}`,
+      ttl: NETEASE_SEARCH_TTL_SEC,
+      staleTtl: NETEASE_STALE_TTL_SEC,
+    };
+  }
+  if (path === "/artist/songs") {
+    const id = String(url.searchParams.get("id") || "").trim();
+    if (!/^\d+$/.test(id)) return null;
+    const offset = String(url.searchParams.get("offset") || "0");
+    const order = String(url.searchParams.get("order") || "hot");
+    const limit = String(url.searchParams.get("limit") || "100");
+    return {
+      key: `ne:songs:v1:${id}:${order}:${offset}:${limit}`,
+      ttl: NETEASE_SONGS_TTL_SEC,
+      staleTtl: NETEASE_STALE_TTL_SEC,
+    };
+  }
+  return null;
+}
+
+function neteaseJsonResponse(text, { cacheStatus = "HIT", stale = false, ttl = 60 } = {}) {
+  return new Response(text, {
+    status: 200,
+    headers: {
+      "Content-Type": "application/json; charset=utf-8",
+      "Cache-Control": `public, max-age=${Math.min(60, ttl)}`,
+      "X-Netease-Cache": cacheStatus,
+      ...(stale ? { "X-Cache-Stale": "1" } : {}),
+      ...cors,
+    },
+  });
+}
+
+async function readNeteaseStale(env, key) {
+  if (!env.ARTIST_TOP || !key) return null;
+  try {
+    return await env.ARTIST_TOP.get(key);
+  } catch {
+    return null;
+  }
+}
 
 async function proxyNetease(request, env, url) {
   const origin = String(env.NETEASE_API_ORIGIN || "").replace(/\/+$/, "");
@@ -1152,6 +1656,22 @@ async function proxyNetease(request, env, url) {
 
   const stripped = url.pathname.replace(/^\/api\/netease/, "") || "/";
   const target = new URL(stripped + url.search, origin + "/");
+  const spec = request.method === "GET" ? neteaseCacheSpec(stripped, url) : null;
+
+  if (spec) {
+    try {
+      const cache = caches.default;
+      const hit = await cache.match(new Request(`https://ne-cache.heipaclub.internal/${spec.key}`));
+      if (hit) {
+        const headers = new Headers(hit.headers);
+        headers.set("X-Netease-Cache", "HIT");
+        Object.entries(cors).forEach(([k, v]) => headers.set(k, v));
+        return new Response(hit.body, { status: 200, headers });
+      }
+    } catch {
+      /* ignore */
+    }
+  }
 
   // 冷门歌手热门榜：透传路径上的 KV 记忆（24h），避免反复打源站
   const topSongId = artistTopSongIdFromPath(stripped, url);
@@ -1165,6 +1685,7 @@ async function proxyNetease(request, env, url) {
           headers: {
             "Content-Type": "application/json; charset=utf-8",
             "X-Artist-Top-Cache": "HIT",
+            "X-Netease-Cache": "KV",
             "Cache-Control": "public, max-age=60",
             ...cors,
           },
@@ -1191,13 +1712,65 @@ async function proxyNetease(request, env, url) {
     init.body = request.body;
   }
 
-  const upstream = await fetch(target.toString(), init);
+  let upstream;
+  try {
+    upstream = await fetch(target.toString(), {
+      ...init,
+      signal: AbortSignal.timeout(8000),
+    });
+  } catch {
+    const stale = spec ? await readNeteaseStale(env, spec.key) : null;
+    if (stale) return neteaseJsonResponse(stale, { cacheStatus: "STALE", stale: true, ttl: spec.ttl });
+    if (topSongId && env.ARTIST_TOP) {
+      const topStale = await readNeteaseStale(env, `raw:top:v1:${topSongId}`);
+      if (topStale) {
+        return new Response(topStale, {
+          status: 200,
+          headers: {
+            "Content-Type": "application/json; charset=utf-8",
+            "X-Artist-Top-Cache": "STALE",
+            "X-Cache-Stale": "1",
+            ...cors,
+          },
+        });
+      }
+    }
+    noteFiveXx();
+    return json({ error: "netease upstream timeout" }, 504);
+  }
+
+  if (!upstream.ok) {
+    const stale = spec ? await readNeteaseStale(env, spec.key) : null;
+    if (stale) return neteaseJsonResponse(stale, { cacheStatus: "STALE", stale: true, ttl: spec.ttl });
+    if (topSongId && env.ARTIST_TOP) {
+      const topStale = await readNeteaseStale(env, `raw:top:v1:${topSongId}`);
+      if (topStale) {
+        return new Response(topStale, {
+          status: 200,
+          headers: {
+            "Content-Type": "application/json; charset=utf-8",
+            "X-Artist-Top-Cache": "STALE",
+            "X-Cache-Stale": "1",
+            ...cors,
+          },
+        });
+      }
+    }
+    if (upstream.status >= 500) noteFiveXx();
+    const out = new Headers(upstream.headers);
+    out.set("Access-Control-Allow-Origin", "*");
+    out.set("X-Netease-Cache", "MISS");
+    return new Response(upstream.body, {
+      status: upstream.status,
+      statusText: upstream.statusText,
+      headers: out,
+    });
+  }
 
   if (
     request.method === "GET" &&
     topSongId &&
-    env.ARTIST_TOP &&
-    upstream.ok
+    env.ARTIST_TOP
   ) {
     try {
       const text = await upstream.text();
@@ -1216,13 +1789,39 @@ async function proxyNetease(request, env, url) {
         },
       });
     } catch {
-      /* fall through — body already consumed; re-fetch unlikely needed */
+      /* fall through */
+    }
+  }
+
+  if (request.method === "GET" && spec) {
+    try {
+      const text = await upstream.text();
+      if (env.ARTIST_TOP) {
+        try {
+          await env.ARTIST_TOP.put(spec.key, text, { expirationTtl: spec.staleTtl });
+        } catch {
+          /* ignore kv */
+        }
+      }
+      const res = neteaseJsonResponse(text, { cacheStatus: "MISS", ttl: spec.ttl });
+      try {
+        await caches.default.put(
+          new Request(`https://ne-cache.heipaclub.internal/${spec.key}`),
+          res.clone()
+        );
+      } catch {
+        /* ignore */
+      }
+      return res;
+    } catch {
+      /* fall through */
     }
   }
 
   const out = new Headers(upstream.headers);
   out.set("Access-Control-Allow-Origin", "*");
   out.set("X-Artist-Top-Cache", "BYPASS");
+  out.set("X-Netease-Cache", "BYPASS");
   return new Response(upstream.body, {
     status: upstream.status,
     statusText: upstream.statusText,
@@ -1362,29 +1961,131 @@ function normalizeUpstreamCoverUrl(target, size) {
   return target.toString();
 }
 
-async function proxyCoverImage(url) {
-  const raw = url.searchParams.get("u") || "";
+function upgradeCoverUrlToHttps(raw) {
+  return String(raw || "").replace(/^http:/i, "https:");
+}
+
+async function coverIdentityKey(rawUrl) {
+  try {
+    const u = new URL(upgradeCoverUrlToHttps(rawUrl));
+    const id = `${u.origin}${u.pathname}`;
+    const digest = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(id));
+    return `${IMG_KV_PREFIX}${[...new Uint8Array(digest)].map((b) => b.toString(16).padStart(2, "0")).join("")}`;
+  } catch {
+    return "";
+  }
+}
+
+function coverFetchHeaders() {
+  return {
+    Referer: "https://music.163.com/",
+    "User-Agent":
+      "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+    Accept: "image/avif,image/webp,image/apng,image/*,*/*;q=0.8",
+  };
+}
+
+function fetchCoverUrl320(rawUrl) {
+  try {
+    const u = new URL(upgradeCoverUrlToHttps(rawUrl));
+    if (isNeteaseCoverHost(u.hostname)) {
+      return `${u.origin}${u.pathname}?param=320y320`;
+    }
+    if (u.hostname.toLowerCase().includes("mzstatic.com")) {
+      return u.toString().replace(/\/\d+x\d+bb\./, "/320x320bb.");
+    }
+    return u.toString();
+  } catch {
+    return "";
+  }
+}
+
+function imgPlaceholderResponse(reason = "placeholder") {
+  return new Response(IMG_PLACEHOLDER_SVG, {
+    status: 200,
+    headers: {
+      "Content-Type": "image/svg+xml; charset=utf-8",
+      "Cache-Control": "public, max-age=30",
+      "X-Img-Cache": "PLACEHOLDER",
+      "X-Img-Error": String(reason || "placeholder").slice(0, 80),
+      ...cors,
+    },
+  });
+}
+
+function persistCoverToKv(env, ctx, key, bytes, ctype) {
+  if (!env?.ARTIST_TOP || !key || !bytes) return;
+  const job = env.ARTIST_TOP.put(key, bytes, {
+    expirationTtl: IMG_KV_TTL_SEC,
+    metadata: { ctype: ctype || "image/jpeg" },
+  }).catch(() => {});
+  if (ctx?.waitUntil) ctx.waitUntil(job);
+  return job;
+}
+
+async function buildImageEtag(upstreamUrl, size, ctype = "") {
+  const src = `img:v2:${upstreamUrl}|s=${size || 0}|t=${ctype}`;
+  const digest = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(src));
+  const bytes = Array.from(new Uint8Array(digest).slice(0, 12));
+  const hex = bytes.map((x) => x.toString(16).padStart(2, "0")).join("");
+  return `W/"${hex}"`;
+}
+
+async function proxyCoverImage(request, url, env, ctx) {
+  const raw = upgradeCoverUrlToHttps(url.searchParams.get("u") || "");
   let target;
   try {
     target = new URL(raw);
   } catch {
-    return json({ error: "bad url" }, 400);
+    return imgPlaceholderResponse("bad-url");
   }
   if (target.protocol !== "https:" && target.protocol !== "http:") {
-    return json({ error: "bad protocol" }, 400);
+    return imgPlaceholderResponse("bad-protocol");
+  }
+  if (target.protocol === "http:") {
+    target = new URL(upgradeCoverUrlToHttps(target.toString()));
   }
   if (!isAllowedCoverHost(target.hostname)) {
-    return json({ error: "host not allowed" }, 403);
+    return imgPlaceholderResponse("host-not-allowed");
   }
 
   const requested = normalizeCoverSize(url.searchParams.get("s") || url.searchParams.get("size") || 0);
   const fromUrl = isNeteaseCoverHost(target.hostname) ? parseNeteaseParamSize(target) : 0;
   const size = requested || fromUrl || 0;
   const upstreamUrl = normalizeUpstreamCoverUrl(target, size);
+  const reqEtag = String(request.headers.get("if-none-match") || "").trim();
+  const kvKey = await coverIdentityKey(target.toString());
+
+  if (env?.ARTIST_TOP && kvKey) {
+    try {
+      const got = await env.ARTIST_TOP.getWithMetadata(kvKey, { type: "arrayBuffer" });
+      if (got?.value && got.value.byteLength) {
+        const ctype = got.metadata?.ctype || "image/jpeg";
+        const etag = await buildImageEtag(upstreamUrl, size, ctype);
+        const headers = {
+          "Content-Type": ctype.startsWith("image/") ? ctype : "image/jpeg",
+          "Cache-Control": "public, max-age=604800, stale-while-revalidate=86400",
+          ETag: etag,
+          "X-Img-Cache": "KV",
+          ...cors,
+        };
+        if (reqEtag && reqEtag === etag) {
+          return new Response(null, { status: 304, headers });
+        }
+        return new Response(got.value, { status: 200, headers });
+      }
+    } catch {
+      /* fall through */
+    }
+  }
 
   // Stable Worker Cache API key (normalized upstream + size), independent of client `u=` encoding.
   const cacheKey = new Request(
     `https://img-cache.heipaclub.internal/v1?u=${encodeURIComponent(upstreamUrl)}&s=${size || 0}`,
+    { method: "GET" }
+  );
+  const staleKey = new Request(
+    `https://img-cache.heipaclub.internal/stale/v1?u=${encodeURIComponent(upstreamUrl)}&s=${size || 0}`,
     { method: "GET" }
   );
   const cache = caches.default;
@@ -1394,52 +2095,89 @@ async function proxyCoverImage(url) {
     Object.entries(cors).forEach(([k, v]) => headers.set(k, v));
     headers.set("Cache-Control", "public, max-age=604800, stale-while-revalidate=86400");
     headers.set("X-Img-Cache", "HIT");
+    if (!headers.has("ETag")) {
+      headers.set("ETag", await buildImageEtag(upstreamUrl, size, headers.get("Content-Type") || ""));
+    }
+    if (reqEtag && reqEtag === headers.get("ETag")) {
+      return new Response(null, { status: 304, headers });
+    }
     return new Response(cached.body, { status: cached.status, headers });
   }
 
-  const upstream = await fetch(upstreamUrl, {
-    cf: {
-      // Cache third-party image bytes at the edge so NetEase CDN latency
-      // mostly hits cold/first visitors only.
-      cacheEverything: true,
-      cacheTtl: 60 * 60 * 24 * 7,
-      cacheTtlByStatus: { "200-299": 604800, "400-499": 60, "500-599": 0 },
-    },
-    headers: {
-      Referer: "https://music.163.com/",
-      "User-Agent":
-        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-      Accept: "image/avif,image/webp,image/apng,image/*,*/*;q=0.8",
-    },
-  });
+  let upstream;
+  try {
+    upstream = await fetch(upstreamUrl, {
+      cf: {
+        cacheEverything: true,
+        cacheTtl: 60 * 60 * 24 * 7,
+        cacheTtlByStatus: { "200-299": 604800, "400-499": 60, "500-599": 0 },
+      },
+      headers: coverFetchHeaders(),
+    });
+  } catch {
+    try {
+      const stale = await cache.match(staleKey);
+      if (stale) {
+        const headers = new Headers(stale.headers);
+        Object.entries(cors).forEach(([k, v]) => headers.set(k, v));
+        headers.set("X-Img-Cache", "STALE");
+        headers.set("Cache-Control", "public, max-age=120, stale-while-revalidate=86400");
+        return new Response(stale.body, { status: 200, headers });
+      }
+    } catch {
+      /* ignore */
+    }
+    return imgPlaceholderResponse("origin-fetch");
+  }
 
   if (!upstream.ok) {
-    return new Response(null, {
-      status: upstream.status,
-      headers: { ...cors, "Cache-Control": "no-store", "X-Img-Cache": "MISS" },
-    });
+    try {
+      const stale = await cache.match(staleKey);
+      if (stale) {
+        const headers = new Headers(stale.headers);
+        Object.entries(cors).forEach(([k, v]) => headers.set(k, v));
+        headers.set("X-Img-Cache", "STALE");
+        headers.set("Cache-Control", "public, max-age=120, stale-while-revalidate=86400");
+        return new Response(stale.body, { status: 200, headers });
+      }
+    } catch {
+      /* ignore */
+    }
+    return imgPlaceholderResponse(`origin-${upstream.status}`);
   }
 
   const ctype = upstream.headers.get("Content-Type") || "image/jpeg";
   if (!ctype.startsWith("image/") && ctype !== "application/octet-stream") {
-    return json({ error: "not an image" }, 415);
+    return imgPlaceholderResponse("not-an-image");
   }
 
+  const bytes = await upstream.arrayBuffer();
+  if (!bytes.byteLength) return imgPlaceholderResponse("empty-body");
+
+  const outCtype = ctype.startsWith("image/") ? ctype : "image/jpeg";
+  persistCoverToKv(env, ctx, kvKey, bytes, outCtype);
+
+  const etag = await buildImageEtag(upstreamUrl, size, ctype);
   const outHeaders = {
-    "Content-Type": ctype.startsWith("image/") ? ctype : "image/jpeg",
-    // Browser + CDN: long-lived success, allow stale while revalidate.
+    "Content-Type": outCtype,
     "Cache-Control": "public, max-age=604800, stale-while-revalidate=86400",
+    ETag: etag,
     "X-Img-Cache": "MISS",
     ...cors,
   };
-  const response = new Response(upstream.body, {
+  if (reqEtag && reqEtag === etag) {
+    return new Response(null, { status: 304, headers: outHeaders });
+  }
+  const response = new Response(bytes, {
     status: 200,
     headers: outHeaders,
   });
 
-  // Store Worker-exit response so repeat /api/img hits skip re-fetch work.
   try {
     await cache.put(cacheKey, response.clone());
+    const staleHeaders = new Headers(response.headers);
+    staleHeaders.set("Cache-Control", "public, max-age=2592000");
+    await cache.put(staleKey, new Response(bytes, { status: 200, headers: staleHeaders }));
   } catch {
     /* Cache API may reject opaque/unsupported bodies — still return the image. */
   }
@@ -1447,8 +2185,67 @@ async function proxyCoverImage(url) {
   return response;
 }
 
+async function warmVipCoverSlice(env) {
+  if (!env?.ARTIST_TOP) return;
+  let manifest;
+  try {
+    manifest = await env.ARTIST_TOP.get(IMG_MANIFEST_KEY, "json");
+  } catch {
+    return;
+  }
+  const urls = Array.isArray(manifest?.urls) ? manifest.urls : [];
+  if (!urls.length) return;
+  const cursor = Number(manifest.cursor || 0) % urls.length;
+  let warmed = 0;
+  let scanned = 0;
+  while (warmed < IMG_WARM_BATCH && scanned < urls.length) {
+    const idx = (cursor + scanned) % urls.length;
+    scanned += 1;
+    const raw = urls[idx];
+    const key = await coverIdentityKey(raw);
+    if (!key) continue;
+    try {
+      const existing = await env.ARTIST_TOP.get(key);
+      if (existing) continue;
+    } catch {
+      continue;
+    }
+    const fetchUrl = fetchCoverUrl320(raw);
+    if (!fetchUrl) continue;
+    try {
+      const res = await fetch(fetchUrl, { headers: coverFetchHeaders() });
+      if (!res.ok) continue;
+      const ctype = res.headers.get("Content-Type") || "image/jpeg";
+      if (!ctype.startsWith("image/") && ctype !== "application/octet-stream") continue;
+      const buf = await res.arrayBuffer();
+      if (!buf.byteLength || buf.byteLength > 2_000_000) continue;
+      await env.ARTIST_TOP.put(key, buf, {
+        expirationTtl: IMG_KV_TTL_SEC,
+        metadata: { ctype: ctype.startsWith("image/") ? ctype : "image/jpeg" },
+      });
+      warmed += 1;
+    } catch {
+      /* skip one cover */
+    }
+  }
+  try {
+    await env.ARTIST_TOP.put(
+      IMG_MANIFEST_KEY,
+      JSON.stringify({
+        updatedAt: manifest.updatedAt || new Date().toISOString(),
+        urls,
+        cursor: (cursor + scanned) % urls.length,
+        lastWarmAt: new Date().toISOString(),
+        lastWarmCount: warmed,
+      })
+    );
+  } catch {
+    /* ignore manifest cursor update */
+  }
+}
+
 export default {
-  async fetch(request, env) {
+  async fetch(request, env, ctx) {
     if (request.method === "OPTIONS") {
       return new Response(null, { status: 204, headers: cors });
     }
@@ -1456,9 +2253,18 @@ export default {
     const url = new URL(request.url);
     const path = url.pathname.replace(/\/+$/, "") || "/";
 
+    if (path === "/api/img" || path.startsWith("/api/img/")) {
+      try {
+        return await proxyCoverImage(request, url, env, ctx);
+      } catch (e) {
+        noteFiveXx();
+        return imgPlaceholderResponse(e?.message || "img-throw");
+      }
+    }
+
     try {
-      if (path === "/api/img" || path.startsWith("/api/img/")) {
-        return await proxyCoverImage(url);
+      if (path === "/api/health") {
+        return await handleHealth(env);
       }
 
       if (path === "/api/artist-top" || path.startsWith("/api/artist-top/")) {
@@ -1476,16 +2282,81 @@ export default {
         if (!env.DB) {
           return json({ error: "D1 binding DB missing" }, 503);
         }
+        if (request.method === "GET") {
+          // Always prefer any snapshot over blank/429. Never rate-limit cache hits.
+          const snap = await tryServeRankSnapshot(env, path, url, { allowStale: true });
+          if (snap) return snap;
+          const edge = await tryServeRankEdgeCache(path, url);
+          if (edge) return edge;
+
+          const limited = rateLimitedResponse(request, "rank", RATE_LIMIT_RANK);
+          if (limited) {
+            const soft = await tryServeRankSnapshot(env, path, url, { allowStale: true });
+            if (soft) return soft;
+            return limited;
+          }
+
+          try {
+            const produced = await cachedProducerResponse(
+              `https://rank-cache.heipaclub.internal${path}?${url.searchParams}`,
+              () => handleRank(request, env, path, url),
+              RANK_CACHE_TTL_SEC,
+              "X-Rank-Cache"
+            );
+            const kind = rankSnapshotKind(path);
+            if (
+              produced.ok &&
+              kind &&
+              env.ARTIST_TOP &&
+              produced.headers.get("X-Rank-Cache") === "MISS"
+            ) {
+              const job = (async () => {
+                try {
+                  const text = await produced.clone().text();
+                  await putRankSnapshots(env, kind, text);
+                } catch {
+                  /* ignore */
+                }
+              })();
+              if (ctx?.waitUntil) ctx.waitUntil(job);
+            }
+            if (!produced.ok) {
+              const soft = await tryServeRankSnapshot(env, path, url, { allowStale: true });
+              if (soft) return soft;
+            }
+            return produced;
+          } catch (e) {
+            noteFiveXx();
+            const soft = await tryServeRankSnapshot(env, path, url, { allowStale: true });
+            if (soft) return soft;
+            return json({ error: e.message || "rank unavailable" }, 503);
+          }
+        }
         return await handleRank(request, env, path, url);
       }
 
       if (path.startsWith("/api/netease")) {
+        if (request.method === "GET") {
+          const limited = rateLimitedResponse(request, "netease", RATE_LIMIT_NETEASE);
+          if (limited) return limited;
+        }
         return await proxyNetease(request, env, url);
       }
 
       return json({ error: "not found" }, 404);
     } catch (e) {
+      noteFiveXx();
       return json({ error: e.message || "server error" }, 500);
     }
+  },
+
+  async scheduled(_event, env, ctx) {
+    // Rank snapshots first (game UX); covers are best-effort after.
+    ctx.waitUntil(
+      (async () => {
+        await precomputeRankSnapshots(env);
+        await warmVipCoverSlice(env);
+      })()
+    );
   },
 };

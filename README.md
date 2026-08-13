@@ -101,6 +101,7 @@ cd ../heipaclub && npm run dev
 | `npm run dev` | 本地开发 |
 | `npm run deploy` | build + 推上 Cloudflare |
 | `npm run hot-tops` | 重打热门静态包（需 api-enhanced） |
+| `npm run cache-covers` | 热门歌手/厂牌封面灌入 KV（高峰不回源网易） |
 | `npm run roster` | 重建歌手名单 |
 | `npm run db:init` / `db:init:local` | 初始化远程 / 本地 D1 |
 

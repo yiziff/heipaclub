@@ -59,6 +59,25 @@ export function filterRankItemsByRegion(items, region, kind) {
   });
 }
 
+/** Client search over a full cached board (avoids server `q` skipping KV). */
+export function filterRankItemsByQuery(items, q = "", kind = "songs") {
+  const needle = norm(q);
+  if (!needle) return items || [];
+  return (items || []).filter((item) => {
+    if (kind === "songs") {
+      return (
+        norm(item.title).includes(needle) ||
+        norm(item.artist).includes(needle) ||
+        norm(item.songId).includes(needle)
+      );
+    }
+    return (
+      norm(item.name).includes(needle) ||
+      norm(item.artistId).includes(needle)
+    );
+  });
+}
+
 /**
  * Aggregate artist wins into label leaderboard.
  * @param {Array<{artistId,name,avatar,wins}>} artistItems

@@ -118,6 +118,54 @@ function escAttr(s) {
     .replace(/</g, "&lt;");
 }
 
+export const IMG_FALLBACK_SRC =
+  "data:image/svg+xml," +
+  encodeURIComponent(
+    `<svg xmlns="http://www.w3.org/2000/svg" width="320" height="320"><rect fill="#e6e4df" width="100%" height="100%"/></svg>`
+  );
+
+/** proxy fail → direct CDN → grey SVG. Never strip src (avoids broken-image icon). */
+export function onCoverError(img) {
+  if (!img || img.dataset.imgErr === "2") return;
+  const direct = img.getAttribute("data-direct-src") || img.dataset.directSrc || "";
+  if (direct && img.dataset.imgErr !== "1") {
+    img.dataset.imgErr = "1";
+    img.removeAttribute("srcset");
+    img.src = direct;
+    return;
+  }
+  img.dataset.imgErr = "2";
+  img.removeAttribute("srcset");
+  img.removeAttribute("data-full-src");
+  img.src = IMG_FALLBACK_SRC;
+  img.classList.add("img-broken", "img-fallback");
+}
+
+export function installCoverErrorHandler() {
+  if (typeof window === "undefined") return;
+  window.__heipaImgError = onCoverError;
+}
+
+function imgOnErrorAttr() {
+  return ` onerror="window.__heipaImgError&&window.__heipaImgError(this)"`;
+}
+
+function directSrcAttr(src, size) {
+  const direct = sizedCoverUrl(src, size ?? IMAGE_SIZES.avatar);
+  if (!direct || direct.startsWith("data:") || direct.startsWith("blob:") || direct.startsWith("/")) {
+    return "";
+  }
+  return ` data-direct-src="${escAttr(direct)}"`;
+}
+
+export function bindImageFallback(img) {
+  if (!img || img.dataset.fallbackBound === "1") return;
+  img.dataset.fallbackBound = "1";
+  img.addEventListener("error", () => onCoverError(img));
+}
+
+installCoverErrorHandler();
+
 function buildResponsiveSrcset(src, { size, proxy }) {
   const base = normalizeImageSize(size ?? IMAGE_SIZES.avatar, IMAGE_SIZES.avatar);
   const candidates = Array.from(
@@ -164,7 +212,7 @@ export function imgTag(
     width,
     height,
     sizes,
-    responsive = true,
+    responsive = false,
   } = {}
 ) {
   const safeAlt = escAttr(alt);
@@ -189,5 +237,6 @@ export function imgTag(
       : "";
   const srcsetAttr = srcset ? ` srcset="${escAttr(srcset)}"` : "";
   const sizesAttr = sizes ? ` sizes="${escAttr(sizes)}"` : "";
-  return `<img class="${className}" src="${safeHref}"${srcsetAttr}${sizesAttr} alt="${safeAlt}" loading="${loadingAttr}" decoding="async" referrerpolicy="no-referrer"${prio}${w}${h} />`;
+  const directAttr = directSrcAttr(src, size ?? IMAGE_SIZES.avatar);
+  return `<img class="${className}" src="${safeHref}"${directAttr}${srcsetAttr}${sizesAttr} alt="${safeAlt}" loading="${loadingAttr}" decoding="async" referrerpolicy="no-referrer"${prio}${w}${h}${imgOnErrorAttr()} />`;
 }

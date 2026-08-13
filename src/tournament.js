@@ -32,6 +32,7 @@ export function pickSongs(songs, mode = "battle") {
     labelName: s.labelName || "",
     rosterArtistId: s.rosterArtistId || "",
     rosterArtistName: s.rosterArtistName || "",
+    duelSide: s.duelSide || "",
   }));
   // battle / random: keep hot ranking for the field, shuffle for pairing
   if (mode === "battle" || mode === "random") {

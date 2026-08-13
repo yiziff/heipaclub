@@ -1,5 +1,6 @@
 /**
- * 厂牌巅峰混战：双厂牌各 24 首 → 12 组×4（2+2）→ 每组晋级 2 → 复活 8 → 32 强单败。
+ * 厂牌巅峰混战：双厂牌各 24 首 → 12 组×4（2+2）→ 每组晋级 2 → 复活补齐 → 32 强单败。
+ * 复活席位默认 8（24+8），若直通因重复曲目/少组不足 24，则按缺口加复活。
  */
 import { artistsInLabel, getLabel, HIPHOP_LABELS } from "./data/labels.js";
 import { shuffleInPlace } from "./hangla.js";
@@ -12,9 +13,27 @@ export const BEEF_GROUP_COUNT = 12;
 export const BEEF_GROUP_SIZE = 4;
 export const BEEF_PICKS_PER_GROUP = 2;
 export const BEEF_REVIVAL_COUNT = 8;
+export const BEEF_FIELD_SIZE = 32;
 
 export function songKey(song) {
   return String(song?.id || song?.neteaseId || song?.title || "");
+}
+
+export function uniqueSongs(songs) {
+  const out = [];
+  const seen = new Set();
+  for (const s of songs || []) {
+    const k = songKey(s);
+    if (!k || seen.has(k)) continue;
+    seen.add(k);
+    out.push(s);
+  }
+  return out;
+}
+
+/** 32 强还差几首复活（直通不足时多于 8）。 */
+export function beefRevivalTarget(advanced, goal = BEEF_FIELD_SIZE) {
+  return Math.max(0, goal - uniqueSongs(advanced).length);
 }
 
 export function emptyBeefState(labelA, labelB) {
@@ -37,50 +56,96 @@ export function emptyBeefState(labelA, labelB) {
   };
 }
 
-/** Tag + trim hot songs for one label. */
-export async function loadLabelHotSongs(label, roster, { target = BEEF_SONGS_PER_LABEL, perArtist = 8, loadCup } = {}) {
+function tagLabelSong(s, key, label, m) {
+  return {
+    id: String(s.id || s.neteaseId || key),
+    neteaseId: s.neteaseId ? String(s.neteaseId) : s.id ? String(s.id) : null,
+    title: s.title,
+    artist: s.artist || m.name,
+    album: s.album || s.collection || "",
+    collection: s.collection || s.album || "",
+    year: s.year || "",
+    cover: s.cover || "",
+    coverSm: s.coverSm || s.cover || "",
+    duration_ms: s.duration_ms || null,
+    publishTime: s.publishTime || null,
+    playSource: s.playSource || null,
+    previewUrl: s.previewUrl || "",
+    itunesTrackId: s.itunesTrackId || "",
+    trackViewUrl: s.trackViewUrl || "",
+    labelId: label.id,
+    labelName: label.name,
+    rosterArtistId: m.id,
+    rosterArtistName: m.name,
+  };
+}
+
+/**
+ * Tag + trim hot songs for one label.
+ * 先按成员均分取 perArtist 首；厂牌内合作曲去重后若不足 24，再从各成员剩余热门补齐。
+ * （旧逻辑只拉 perArtist 首再去重，五人组这类合作多的厂牌会误报「仅 21 首」。）
+ */
+export async function loadLabelHotSongs(
+  label,
+  roster,
+  { target = BEEF_SONGS_PER_LABEL, perArtist = 5, loadCup, fetchLimit = 50 } = {}
+) {
   const members = artistsInLabel(roster, label.id).sort(
     (a, b) => Number(b.fans || 0) - Number(a.fans || 0)
   );
   if (!members.length) {
     throw new Error(`厂牌「${label.name}」名单内暂无成员`);
   }
-  const pool = [];
-  const seen = new Set();
+
+  const lists = [];
   for (const m of members) {
-    if (pool.length >= target * 2) break;
     try {
-      const cup = await loadCup(m, { limit: perArtist });
-      for (const s of cup.songs || []) {
-        const key = songKey(s);
-        if (!key || seen.has(key)) continue;
-        seen.add(key);
-        pool.push({
-          id: String(s.id || s.neteaseId || key),
-          neteaseId: s.neteaseId ? String(s.neteaseId) : s.id ? String(s.id) : null,
-          title: s.title,
-          artist: s.artist || m.name,
-          album: s.album || s.collection || "",
-          collection: s.collection || s.album || "",
-          year: s.year || "",
-          cover: s.cover || "",
-          coverSm: s.coverSm || s.cover || "",
-          duration_ms: s.duration_ms || null,
-          publishTime: s.publishTime || null,
-          playSource: s.playSource || null,
-          previewUrl: s.previewUrl || "",
-          itunesTrackId: s.itunesTrackId || "",
-          trackViewUrl: s.trackViewUrl || "",
-          labelId: label.id,
-          labelName: label.name,
-          rosterArtistId: m.id,
-          rosterArtistName: m.name,
-        });
-      }
+      const cup = await loadCup(m, { limit: Math.max(fetchLimit, perArtist) });
+      lists.push({ m, songs: cup.songs || [] });
     } catch {
-      /* skip failing member */
+      lists.push({ m, songs: [] });
     }
   }
+
+  const pool = [];
+  const seen = new Set();
+  const cursors = lists.map(() => 0);
+  const taken = lists.map(() => 0);
+
+  const tryTake = (i, maxForMember) => {
+    if (pool.length >= target) return false;
+    if (taken[i] >= maxForMember) return false;
+    const { m, songs } = lists[i];
+    while (cursors[i] < songs.length) {
+      const s = songs[cursors[i]++];
+      const key = songKey(s);
+      if (!key || seen.has(key)) continue;
+      seen.add(key);
+      pool.push(tagLabelSong(s, key, label, m));
+      taken[i] += 1;
+      return true;
+    }
+    return false;
+  };
+
+  // Pass 1：每人最多 perArtist，避免高粉成员独占名额
+  let progressed = true;
+  while (pool.length < target && progressed) {
+    progressed = false;
+    for (let i = 0; i < lists.length; i++) {
+      if (tryTake(i, perArtist)) progressed = true;
+    }
+  }
+
+  // Pass 2：合作曲去重导致不足时，从各成员剩余热门继续补
+  progressed = true;
+  while (pool.length < target && progressed) {
+    progressed = false;
+    for (let i = 0; i < lists.length; i++) {
+      if (tryTake(i, Number.POSITIVE_INFINITY)) progressed = true;
+    }
+  }
+
   if (pool.length < target) {
     throw new Error(
       `厂牌「${label.name}」热门曲目不足（需要 ${target} 首，仅 ${pool.length} 首）`
@@ -151,9 +216,21 @@ export function collectAfterGroups(groups) {
   const advanced = [];
   const revivalPool = [];
   const wipeouts = [];
+  const advKeys = new Set();
+  const poolKeys = new Set();
   for (const g of groups) {
-    advanced.push(...g.picks);
-    revivalPool.push(...g.eliminated);
+    for (const s of g.picks || []) {
+      const k = songKey(s);
+      if (!k || advKeys.has(k)) continue;
+      advKeys.add(k);
+      advanced.push(s);
+    }
+    for (const s of g.eliminated || []) {
+      const k = songKey(s);
+      if (!k || advKeys.has(k) || poolKeys.has(k)) continue;
+      poolKeys.add(k);
+      revivalPool.push(s);
+    }
     if (g.wipeout) {
       wipeouts.push({
         groupId: g.id,
@@ -165,7 +242,7 @@ export function collectAfterGroups(groups) {
   return { advanced, revivalPool, wipeouts };
 }
 
-export function toggleRevivalPick(picks, pool, songId) {
+export function toggleRevivalPick(picks, pool, songId, max = BEEF_REVIVAL_COUNT) {
   const song = pool.find((s) => songKey(s) === songId);
   if (!song) return { ok: false, picks, error: "不在复活池" };
   const next = [...picks];
@@ -174,21 +251,26 @@ export function toggleRevivalPick(picks, pool, songId) {
     next.splice(idx, 1);
     return { ok: true, picks: next, error: null };
   }
-  if (next.length >= BEEF_REVIVAL_COUNT) {
-    return { ok: false, picks, error: `最多复活 ${BEEF_REVIVAL_COUNT} 首` };
+  if (next.length >= max) {
+    return { ok: false, picks, error: `最多复活 ${max} 首` };
   }
   next.push(song);
   return { ok: true, picks: next, error: null };
 }
 
 export function buildBeefBracket(advanced, revivalPicks) {
-  const field = [...advanced, ...revivalPicks];
-  if (field.length !== 32) {
-    throw new Error(`需要 32 首进淘汰赛，当前 ${field.length}`);
+  const field = uniqueSongs([...(advanced || []), ...(revivalPicks || [])]);
+  if (field.length !== BEEF_FIELD_SIZE) {
+    const thru = uniqueSongs(advanced).length;
+    const need = BEEF_FIELD_SIZE - field.length;
+    throw new Error(
+      need > 0
+        ? `需要 ${BEEF_FIELD_SIZE} 首进淘汰赛，当前 ${field.length}（直通 ${thru}，还差 ${need} 首，请再复活）`
+        : `淘汰赛只要 ${BEEF_FIELD_SIZE} 首，当前 ${field.length}`
+    );
   }
-  // Interleave labels a bit for beef, then build bracket with preset field
   const shuffled = shuffleInPlace([...field]);
-  return buildBracket(shuffled, { mode: "battle", max: 32, field: shuffled });
+  return buildBracket(shuffled, { mode: "battle", max: BEEF_FIELD_SIZE, field: shuffled });
 }
 
 /** Count songs by label among a list. */
@@ -224,7 +306,8 @@ export function beefProgressText(state) {
     return `小组直通 ${state.groupIndex + 1} / ${state.groups.length}`;
   }
   if (state.phase === "revival") {
-    return `复活 ${state.revivalPicks.length} / ${BEEF_REVIVAL_COUNT}`;
+    const need = beefRevivalTarget(state.advanced);
+    return `复活 ${state.revivalPicks.length} / ${need}`;
   }
   if (state.phase === "bracket" && state.bracket) {
     const decided = state.bracket.rounds.flat().filter((m) => m.winner).length;

@@ -166,8 +166,7 @@ export function createPlayer(root) {
       if (!working?.neteaseId && !working?.previewUrl) {
         hint.textContent = "没有可用的试听源。";
       } else {
-        hint.textContent =
-          "暂时拿不到播放链（网易云无版权或需登录；iTunes 未匹配），可点外链打开。";
+        hint.textContent = "试听繁忙，请稍后再试，或点外链打开。";
       }
       return;
     }
@@ -232,6 +231,10 @@ export function createPlayer(root) {
   audio.addEventListener("ended", () => setPlayingUi(false));
   audio.addEventListener("pause", () => setPlayingUi(false));
   audio.addEventListener("play", () => setPlayingUi(true));
+  audio.addEventListener("error", () => {
+    setPlayingUi(false);
+    hint.textContent = "试听繁忙，请稍后再试，或点外链打开。";
+  });
 
   seek.addEventListener("pointerdown", () => {
     seeking = true;
