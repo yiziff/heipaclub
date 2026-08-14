@@ -199,13 +199,15 @@ function esc(s) {
  */
 const SUPPORTERS = {
   sponsorTicker: [
-    { name: "coolbreeze", until: "2026-08-19" },
+    { name: "coolbreeze", amount: "¥20", until: "2026-08-19" },
+    { name: "匿名者", amount: "¥20", until: "2026-08-20" },
   ],
   permanent: [
     { no: 1, name: "coolbreeze", message: "nb", amount: "¥20", date: "2026-08-12" },
     { no: 2, name: "匿名者", message: "Work out well", amount: "¥20", date: "2026-08-13" },
   ],
   weekly: [
+    { name: "擦绒", message: "", amount: "¥5", date: "2026-08-04" },
     { name: "沐屿白", message: "Hiphop forever", amount: "¥5", date: "2026-08-13" },
     {
       name: "乌昂乐艾",
@@ -214,6 +216,9 @@ const SUPPORTERS = {
       date: "2026-08-13",
     },
     { name: "Kimi、", message: "", amount: "¥5", date: "2026-08-13" },
+    { name: "恋", message: "好玩", amount: "¥5", date: "2026-08-13" },
+    { name: "侧柏叶", message: "", amount: "¥5", date: "2026-08-14" },
+    { name: "ReginFi", message: "资金有限只能支持到这了💜", amount: "¥5", date: "2026-08-14" },
   ],
 };
 
@@ -320,7 +325,12 @@ function maybeShowChampDonateTip() {
 function getSponsorTickerText() {
   const sponsors = activeSponsorTickers();
   if (!sponsors.length) return "";
-  return sponsors.map((s) => `感谢 @${s.name} 支持本站运营 ♥`).join("　　");
+  return sponsors
+    .map((s) => {
+      const amt = s.amount ? `（${s.amount}）` : "";
+      return `感谢 @${s.name}${amt} 支持本站运营 ♥`;
+    })
+    .join("　　");
 }
 
 function renderSponsorTickerHtml() {
@@ -336,20 +346,20 @@ function renderSponsorTickerHtml() {
     </div>`;
 }
 
-function renderSupporterCard(s, { showNo = false } = {}) {
+function renderSupporterCard(s, { showNo = false, showAmount = false } = {}) {
   const rank = showNo && s.no ? supporterNoLabel(s.no) : "";
   const msg = String(s.message || "").trim();
   return `<li class="about-site-supporter-card">
     ${rank ? `<div class="about-site-supporter-rank">${esc(rank)}</div>` : ""}
     <div class="about-site-supporter-card-head">
       <span class="about-site-supporter-name">${esc(s.name)}</span>
-      ${s.amount ? `<span class="about-site-supporter-amt">${esc(s.amount)}</span>` : ""}
+      ${showAmount && s.amount ? `<span class="about-site-supporter-amt">${esc(s.amount)}</span>` : ""}
     </div>
     ${msg ? `<p class="about-site-supporter-msg">「${esc(msg)}」</p>` : ""}
   </li>`;
 }
 
-function renderSupportersWallHtml() {
+function renderSupportersWallHtml({ showAmount = false } = {}) {
   const permanent = SUPPORTERS.permanent || [];
   const weekly = SUPPORTERS.weekly || [];
   const empty =
@@ -361,7 +371,7 @@ function renderSupportersWallHtml() {
     ? `<div class="about-site-supporters-block">
         <h3 class="about-site-supporters-subtitle">永久支持者</h3>
         <ul class="about-site-supporters-cards">${permanent
-          .map((s) => renderSupporterCard(s, { showNo: true }))
+          .map((s) => renderSupporterCard(s, { showNo: true, showAmount }))
           .join("")}</ul>
       </div>`
     : "";
@@ -370,7 +380,7 @@ function renderSupportersWallHtml() {
     ? `<div class="about-site-supporters-block">
         <h3 class="about-site-supporters-subtitle">本周支持者</h3>
         <ul class="about-site-supporters-cards">${weekly
-          .map((s) => renderSupporterCard(s))
+          .map((s) => renderSupporterCard(s, { showAmount }))
           .join("")}</ul>
       </div>`
     : "";
@@ -432,12 +442,12 @@ function renderHomeDonateWallItemsHtml(list) {
 }
 
 function renderHomeDonateWallHtml() {
-  const all = sortSupporters(getAllSupporters(), "amount");
-  const hasSupporters = all.length > 0;
-  const top3 = all.slice(0, 3);
-  const canExpand = all.length > 3;
+  const allCount = getAllSupporters().length;
+  const top5 = getTopSupporters(5);
+  const hasSupporters = top5.length > 0;
+  const canExpand = allCount > 5;
   const listHtml = hasSupporters
-    ? renderHomeDonateWallItemsHtml(top3)
+    ? renderHomeDonateWallItemsHtml(top5)
     : `<li class="home-donate-wall-empty">
       <button type="button" class="home-donate-wall-placeholder" data-home-donate-placeholder>期待你的名字 · 扫码支持</button>
     </li>`;
@@ -448,7 +458,7 @@ function renderHomeDonateWallHtml() {
         <span class="home-donate-wall-title">赞赏墙</span>
         ${
           canExpand
-            ? `<button type="button" class="home-donate-wall-expand" data-toggle-donate-wall aria-expanded="false">展开</button>`
+            ? `<button type="button" class="home-donate-wall-expand" data-toggle-donate-wall>展开</button>`
             : ""
         }
       </div>
@@ -662,6 +672,12 @@ app?.addEventListener("click", (e) => {
     e.preventDefault();
     trackEvent("support_open");
     openSupportSite();
+    return;
+  }
+  const messageWall = e.target.closest("[data-message-wall]");
+  if (messageWall) {
+    e.preventDefault();
+    openMessageWall();
   }
 });
 
@@ -900,6 +916,64 @@ function openAboutSite() {
   };
   el.querySelectorAll("[data-about-close]").forEach((node) => {
     node.addEventListener("click", close);
+  });
+  const onKey = (ev) => {
+    if (ev.key === "Escape") {
+      document.removeEventListener("keydown", onKey);
+      close();
+    }
+  };
+  document.addEventListener("keydown", onKey);
+}
+
+function openMessageWall() {
+  const existing = document.getElementById("message-wall");
+  if (existing) existing.remove();
+
+  const el = document.createElement("div");
+  el.id = "message-wall";
+  el.className = "about-site";
+  el.setAttribute("role", "dialog");
+  el.setAttribute("aria-modal", "true");
+  el.setAttribute("aria-labelledby", "message-wall-title");
+  el.innerHTML = `
+    <div class="about-site-backdrop" data-message-wall-close></div>
+    <div class="about-site-panel">
+      <header class="about-site-head">
+        <div class="about-site-head-main">
+          <div class="about-site-icon brand-wordmark" aria-hidden="true">
+            <span class="brand-heipa">黑怕</span>
+          </div>
+          <h2 id="message-wall-title">支持者留言墙</h2>
+        </div>
+        <button type="button" class="about-site-close" data-message-wall-close aria-label="关闭">×</button>
+      </header>
+      <div class="about-site-body">
+        <div class="about-site-supporters">
+          ${renderSupportersWallHtml({ showAmount: false })}
+          <p class="about-site-supporters-note">名单由作者根据赞赏留言手动更新 · 永久墙与本周墙分开展示，感谢每一位支持者 🙏</p>
+        </div>
+      </div>
+      <div class="message-wall-actions">
+        <button type="button" class="about-site-done message-wall-support" data-message-wall-support>我也要支持</button>
+        <button type="button" class="about-site-done" data-message-wall-close>关闭</button>
+      </div>
+    </div>
+  `;
+  document.body.appendChild(el);
+  requestAnimationFrame(() => el.classList.add("is-on"));
+
+  const close = () => {
+    el.classList.remove("is-on");
+    el.classList.add("is-out");
+    setTimeout(() => el.remove(), 220);
+  };
+  el.querySelectorAll("[data-message-wall-close]").forEach((node) => {
+    node.addEventListener("click", close);
+  });
+  el.querySelector("[data-message-wall-support]")?.addEventListener("click", () => {
+    close();
+    setTimeout(() => openSupportSite(), 200);
   });
   const onKey = (ev) => {
     if (ev.key === "Escape") {
@@ -1547,6 +1621,7 @@ function renderHome() {
       <div class="hero-about-actions">
         <button type="button" class="about-site-btn" data-about-site>[关于本站]</button>
         <button type="button" class="about-site-btn" data-support-site>[支持运营]</button>
+        <button type="button" class="about-site-btn" data-message-wall>[留言墙]</button>
       </div>
       <button type="button" class="donate-ticker" data-support-site aria-label="打开支持运营">
         <span class="donate-ticker-track">
@@ -1602,17 +1677,10 @@ function renderHome() {
   document.getElementById("beef-entry")?.addEventListener("click", () => navigate("/label-beef"));
   document.getElementById("duel-king-entry")?.addEventListener("click", () => navigate("/duel-king"));
 
-  const donateWall = app.querySelector("[data-home-donate-wall]");
   const donateToggle = app.querySelector("[data-toggle-donate-wall]");
-  const donateList = app.querySelector("[data-home-donate-list]");
   donateToggle?.addEventListener("click", () => {
-    if (!donateWall || !donateList) return;
-    const expanded = donateWall.classList.toggle("is-expanded");
-    const all = sortSupporters(getAllSupporters(), "amount");
-    donateList.innerHTML = renderHomeDonateWallItemsHtml(expanded ? all : all.slice(0, 3));
-    donateToggle.textContent = expanded ? "收起" : "展开";
-    donateToggle.setAttribute("aria-expanded", expanded ? "true" : "false");
-    trackEvent(expanded ? "donate_wall_expand" : "donate_wall_collapse");
+    trackEvent("donate_wall_expand");
+    openMessageWall();
   });
   app.querySelector("[data-home-donate-placeholder]")?.addEventListener("click", () => {
     trackEvent("support_open");
