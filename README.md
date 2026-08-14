@@ -1,5 +1,5 @@
-#求star⭐ ！！！
- # 黑怕巅峰对决 · HeiPaClub
+
+ # 求star⭐ ！！！黑怕巅峰对决 · HeiPaClub
 
 <p align="center">
   <strong>给你的本命 RapStar / Hit Song，办一场真正的说唱巅峰对决。</strong><br/>
