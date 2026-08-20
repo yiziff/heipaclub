@@ -199,12 +199,13 @@ function esc(s) {
  */
 const SUPPORTERS = {
   sponsorTicker: [
-    { name: "coolbreeze", amount: "¥20", until: "2026-08-19" },
     { name: "匿名者", amount: "¥20", until: "2026-08-20" },
+    { name: "Chos1npm", amount: "¥20", until: "2026-08-21" },
   ],
   permanent: [
     { no: 1, name: "coolbreeze", message: "nb", amount: "¥20", date: "2026-08-12" },
     { no: 2, name: "匿名者", message: "Work out well", amount: "¥20", date: "2026-08-13" },
+    { no: 3, name: "Chos1npm", message: "加油 bro", amount: "¥20", date: "2026-08-14" },
   ],
   weekly: [
     { name: "擦绒", message: "", amount: "¥5", date: "2026-08-04" },
@@ -219,6 +220,9 @@ const SUPPORTERS = {
     { name: "恋", message: "好玩", amount: "¥5", date: "2026-08-13" },
     { name: "侧柏叶", message: "", amount: "¥5", date: "2026-08-14" },
     { name: "ReginFi", message: "资金有限只能支持到这了💜", amount: "¥5", date: "2026-08-14" },
+    { name: "1", message: "加油", amount: "¥5", date: "2026-08-15" },
+    { name: "兔本兔", message: "", amount: "¥5", date: "2026-08-15" },
+    { name: "这是名字", message: "do it better 👍", amount: "¥5", date: "2026-08-17" },
   ],
 };
 
